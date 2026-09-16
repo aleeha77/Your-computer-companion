@@ -1,0 +1,66 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.egg
+.installed.cfg
+.python-version
+
+# --- Virtual environments -------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Environment / secrets ------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Test / tooling caches ------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+
+# --- IDE / editors ---------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- OS junk ---------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Logs -------------------------------------------------------------------
+*.log
+logs/
+peeko.log
+
+# --- Packaging artifacts ----------------------------------------------------
+*.whl
+*.tar.gz
+*.app
+*.dmg
+*.exe
+*.msi
+
+# --- PyInstaller ------------------------------------------------------------
+build/
+dist/
+*.spec

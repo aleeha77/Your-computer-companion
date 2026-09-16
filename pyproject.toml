@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peeko"
+version = "0.1.0"
+description = "Peeko — a cute, animated desktop robot companion living on your desktop (Stage 0: project foundation)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Peeko Developers" }]
+keywords = ["desktop", "companion", "pet", "pyside6", "qt", "avatar"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "python-dotenv>=1.0",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+peeko = "peeko.app:main"
+
+[tool.setuptools.packages.find]
+include = ["peeko*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
