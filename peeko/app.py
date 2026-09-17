@@ -109,12 +109,30 @@ def _create_app(argv: list[str]):
     return QApplication(argv)
 
 
+def _report_startup_failure(message: str, *, interactive: bool) -> None:
+    """Show the friendly startup-error dialog for a real GUI session.
+
+    In a non-interactive run (``PEEKO_SMOKE_TEST=1``, headless CI) nobody
+    can dismiss a modal dialog, so showing one would hang the process
+    instead of letting it fail cleanly with a non-zero exit code. The
+    failure is always logged by the caller; only the dialog is skipped.
+    """
+    if not interactive:
+        LOG.debug("Non-interactive run: startup error dialog suppressed.")
+        return
+    from peeko.errors import _show_friendly_dialog
+
+    _show_friendly_dialog("Peeko could not start", message)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run Peeko; returns the process exit code."""
     argv = list(sys.argv if argv is None else argv)
     app = None
+    interactive = True
     try:
         settings = load_settings()
+        interactive = not settings.smoke_test
         setup_logging(settings.log_level, settings.log_dir)
         LOG.info(
             "%s v%s starting (Stage %d of %d)",
@@ -141,24 +159,16 @@ def main(argv: list[str] | None = None) -> int:
         return app.exec()
     except PeekoError as exc:
         LOG.error("Startup failed: %s", exc.message)
-        try:
-            from peeko.errors import _show_friendly_dialog
-
-            _show_friendly_dialog("Peeko could not start", exc.message)
-        finally:
-            return 1
+        _report_startup_failure(exc.message, interactive=interactive)
+        return 1
     except Exception:  # noqa: BLE001 - last-resort startup guard
         LOG.critical("Unexpected startup failure", exc_info=True)
-        try:
-            from peeko.errors import _show_friendly_dialog
-
-            _show_friendly_dialog(
-                "Peeko could not start",
-                "An unexpected error occurred while starting. Check the "
-                "log file for details.",
-            )
-        finally:
-            return 1
+        _report_startup_failure(
+            "An unexpected error occurred while starting. Check the "
+            "log file for details.",
+            interactive=interactive,
+        )
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover - console entry convenience

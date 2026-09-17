@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="180" viewBox="0 0 160 180">
+  <!-- Eyes: pupils glancing down. -->
+  <ellipse cx="62" cy="82" rx="10" ry="13" fill="#FFFFFF" stroke="#2B7A78" stroke-width="1.5"/>
+  <ellipse cx="62" cy="92" rx="4.2" ry="5.5" fill="#17252E"/>
+  <ellipse cx="98" cy="82" rx="10" ry="13" fill="#FFFFFF" stroke="#2B7A78" stroke-width="1.5"/>
+  <ellipse cx="98" cy="92" rx="4.2" ry="5.5" fill="#17252E"/>
+</svg>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="180" viewBox="0 0 160 180">
+  <!-- Peeko placeholder robot body. Canvas 160x180: eyes layer stacks on top. -->
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#A5F0D6"/>
+      <stop offset="1" stop-color="#2E9E97"/>
+    </linearGradient>
+  </defs>
+  <!-- feet stubs (body overlaps their tops) -->
+  <rect x="54" y="160" width="20" height="12" rx="6" fill="#2E9E97" stroke="#2B7A78" stroke-width="2.5"/>
+  <rect x="86" y="160" width="20" height="12" rx="6" fill="#2E9E97" stroke="#2B7A78" stroke-width="2.5"/>
+  <!-- antennae -->
+  <path d="M50 62 Q48 44 50 34" fill="none" stroke="#2B7A78" stroke-width="4" stroke-linecap="round"/>
+  <path d="M110 62 Q112 44 110 34" fill="none" stroke="#2B7A78" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="50" cy="30" r="6" fill="#FFC857"/>
+  <circle cx="110" cy="30" r="6" fill="#FFC857"/>
+  <!-- little arms -->
+  <path d="M30 118 Q18 122 14 130" fill="none" stroke="#2B7A78" stroke-width="5" stroke-linecap="round"/>
+  <path d="M130 118 Q142 122 146 130" fill="none" stroke="#2B7A78" stroke-width="5" stroke-linecap="round"/>
+  <!-- body -->
+  <ellipse cx="80" cy="112" rx="50" ry="54" fill="url(#bodyGrad)" stroke="#2B7A78" stroke-width="3"/>
+  <!-- mouth -->
+  <rect x="73" y="112" width="14" height="6" rx="3" fill="#17252E"/>
+  <!-- belly panel -->
+  <ellipse cx="80" cy="136" rx="20" ry="12" fill="#5BC0BE" stroke="#2B7A78" stroke-width="2" opacity="0.9"/>
+</svg>

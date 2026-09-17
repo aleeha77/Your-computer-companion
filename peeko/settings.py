@@ -34,6 +34,7 @@ from peeko.paths import ensure_dirs, get_config_dir, get_data_dir, get_log_dir
 # ---------------------------------------------------------------------------
 ENV_LOG_LEVEL = "PEEKO_LOG_LEVEL"
 ENV_SMOKE_TEST = "PEEKO_SMOKE_TEST"
+ENV_AVATAR_ASSETS_DIR = "PEEKO_AVATAR_ASSETS_DIR"
 ENV_AI_PROVIDER = "PEEKO_AI_PROVIDER"
 ENV_AI_MODEL = "PEEKO_AI_MODEL"
 ENV_AI_API_KEY = "PEEKO_AI_API_KEY"
@@ -58,6 +59,12 @@ def _as_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_optional_path(value: str) -> Path | None:
+    """An empty/absent setting means "use the built-in default"."""
+    value = value.strip()
+    return Path(value).expanduser() if value else None
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings.
@@ -78,6 +85,13 @@ class Settings:
     # -- behaviour ---------------------------------------------------------
     log_level: str = "INFO"
     smoke_test: bool = False  # auto-quit ~2 s after startup (headless CI)
+
+    # -- Stage 1: avatar artwork -------------------------------------------
+    #: Folder holding ``manifest.json`` + ``layers/*.svg``. ``None`` means
+    #: "use the artwork packaged inside ``peeko/avatar/assets``", so the
+    #: owner can point Peeko at their own art folder instead of editing
+    #: the installed package.
+    avatar_assets_dir: Path | None = None
 
     # -- Stage 3: AI chat (not implemented yet; config only) ---------------
     ai_provider: str = "openai"
@@ -111,6 +125,9 @@ class Settings:
             "log_dir": str(self.log_dir),
             "log_level": self.log_level,
             "smoke_test": self.smoke_test,
+            "avatar_assets_dir": (
+                str(self.avatar_assets_dir) if self.avatar_assets_dir else None
+            ),
             "ai_provider": self.ai_provider,
             "ai_model": self.ai_model,
             # ai_api_key intentionally omitted
@@ -154,6 +171,7 @@ def load_settings(env: Mapping[str, str] | None = None,
         log_dir=log_dir,
         log_level=raw_level.upper(),
         smoke_test=_as_bool(env.get(ENV_SMOKE_TEST, "0")),
+        avatar_assets_dir=_as_optional_path(env.get(ENV_AVATAR_ASSETS_DIR, "")),
         ai_provider=env.get(ENV_AI_PROVIDER, "openai"),
         ai_model=env.get(ENV_AI_MODEL, ""),
         ai_api_key=env.get(ENV_AI_API_KEY, ""),

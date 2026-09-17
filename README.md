@@ -6,17 +6,24 @@ maintainable, portable **Python desktop application** (PySide6/Qt) — modular,
 privacy-first, no cloud infrastructure. You configure optional AI/voice API
 keys yourself via a local `.env` file and run it on your own machine.
 
-> **Current development stage: Stage 0 of 13 (project foundation).**
+> **Current development stage: Stage 1 of 13 (desktop robot avatar —
+> completed).**
 > See [Current development stage](#current-development-stage) below.
 
 ---
 
 ## Features
 
-At Stage 0 the foundation is in place; later stages add the creature's life:
-
-- ✅ **Desktop window**: frameless, translucent, always-on-top placeholder
-  avatar (a rounded blob with eyes) that you can drag anywhere.
+- ✅ **Animated desktop avatar**: a small robot that lives directly on your
+  desktop — frameless, translucent, always-on-top, draggable anywhere.
+- ✅ **Alive-looking behaviour** (Stage 1): a gentle idle bob, natural-ish
+  irregular blinking, occasional glances left/right/up/down, glances toward
+  the mouse cursor when it hovers nearby, a happy squash-and-bounce when
+  clicked, and a "being carried" wiggle while dragged.
+- ✅ **Swap-in-your-own artwork**: the whole character is described by a
+  data manifest (`peeko/avatar/assets/manifest.json`) plus SVG layers — no
+  code changes to replace the placeholder robot with your own art. See
+  [Avatar artwork](#avatar-artwork--swap-in-your-own-robot).
 - ✅ **Obvious quit affordances**: right-click context menu → *Quit*,
   `Ctrl+Q`, window close, or `Ctrl+C` in the terminal — all quit cleanly.
 - ✅ **Configuration**: environment variables + optional `.env` file
@@ -25,12 +32,16 @@ At Stage 0 the foundation is in place; later stages add the creature's life:
 - ✅ **Logging**: console + rotating file log in your user data directory;
   log level set via `PEEKO_LOG_LEVEL`; secrets are never logged.
 - ✅ **Error handling**: global exception hook logs the traceback and shows a
-  friendly dialog before exiting; clean startup-failure paths.
+  friendly dialog before exiting; a broken artwork manifest fails loudly at
+  startup with a readable list of every problem instead of drawing a broken
+  robot.
+- ✅ **Never blocks the UI**: animation runs on `QTimer` callbacks (plus a
+  Qt-free, unit-tested state machine); no sleeps anywhere in the engine.
 - ✅ **Headless smoke test**: `PEEKO_SMOKE_TEST=1` auto-quits ~2 s after
   launch with exit code 0, so CI/headless boxes can verify the whole app.
-- 🔜 **Coming in later stages**: AI chat, voice input, text-to-speech,
-  emotions, virtual-pet needs, persistent memory, app awareness,
-  autonomous life, polish, packaging, final testing.
+- 🔜 **Coming in later stages**: interaction extras, AI chat, voice input,
+  text-to-speech, emotions, virtual-pet needs, persistent memory, app
+  awareness, autonomous life, polish, packaging, final testing.
 
 ## Tech stack
 
@@ -84,6 +95,7 @@ cp .env.example .env   # optional — Peeko works with defaults alone
 | ----------------------- | ----- | --------------------------------------------------------- | --------------- |
 | `PEEKO_LOG_LEVEL`       | 0     | Log verbosity (`CRITICAL`/`ERROR`/`WARNING`/`INFO`/`DEBUG`) | `INFO`        |
 | `PEEKO_SMOKE_TEST`      | 0     | Auto-quit ~2 s after startup (headless verification)      | `0` (off)       |
+| `PEEKO_AVATAR_ASSETS_DIR` | 1   | Folder with your own `manifest.json` + `layers/`          | packaged art    |
 | `PEEKO_DATA_DIR`        | 0     | Override user data directory (defaults: OS convention)    | platformdirs    |
 | `PEEKO_CONFIG_DIR`      | 0     | Override user config directory                            | platformdirs    |
 | `PEEKO_LOG_DIR`         | 0     | Override log directory (default `<data_dir>/logs`)        | platformdirs    |
@@ -105,9 +117,13 @@ source tree):
 python -m peeko          # after `pip install .` also just: peeko
 ```
 
-You should see a small floating teal blob with eyes in the top-right of your
-screen. Drag it anywhere. Right-click → **Quit** (or press `Ctrl+Q`, or hit
-`Ctrl+C` in the terminal) to exit.
+A small robot appears in the top-right of your screen, floating on a soft
+shadow **without any window frame or background** — you can keep working in
+other apps and it stays visible on top. It bobs gently, blinks now and then,
+occasionally glances around (and toward your mouse cursor when it comes
+close), does a happy squash-and-bounce when you click it, and wiggles while
+you drag it anywhere on the desktop. Drag it by holding the left button;
+right-click → **Quit** (or `Ctrl+Q`, or `Ctrl+C` in the terminal) to exit.
 
 Headless verification (CI servers, containers, SSH boxes):
 
@@ -138,6 +154,29 @@ backend. Two supported ways:
 Use `pip install .[dev]` plus `pytest` before shipping anything. Never
 commit a real `.env` — the repo ignores it.
 
+## Avatar artwork — swap in your own robot
+
+Peeko's character is **data, not code**. Everything you see is described by
+`peeko/avatar/assets/manifest.json` (canvas size, layer stacking order,
+animations, frame timings) plus the SVG files in
+`peeko/avatar/assets/layers/`.
+
+To use your own art:
+
+1. Draw your robot as SVGs at the manifest's canvas size (default
+   `160×180`), one file per layer state (body, eyes open/closed/looking…).
+2. Edit `layer_defaults` in `manifest.json` to point at your files, and
+   adjust the animations (timings, bob offsets) to taste.
+3. Run `peeko` — your artwork appears. No Python changes, ever.
+
+Keep your art **outside** the installed package if you prefer: point
+`PEEKO_AVATAR_ASSETS_DIR` at a folder containing your own `manifest.json`
+and `layers/`, and Peeko loads that instead.
+
+The full walk-through (manifest reference, frame keys, adding new
+animations, gotchas) lives in
+[`peeko/avatar/assets/README.md`](peeko/avatar/assets/README.md).
+
 ## Architecture
 
 ```
@@ -149,7 +188,13 @@ peeko/
 ├── paths.py           per-OS data/config/log dirs (platformdirs + overrides)
 ├── logging_setup.py   console + rotating file logging; secret redaction
 ├── errors.py          PeekoError, global exception hook, friendly dialog
-├── avatar/            the on-screen creature (Stage 0: placeholder window)
+├── avatar/            the animated on-screen creature (Stage 1)
+   ├── manifest.py    artwork manifest parsing + validation
+   ├── state_machine.py  timer-driven animation states (Qt-free, unit-tested)
+   ├── assets.py      SVG layer files -> ready-to-draw pixmaps
+   ├── renderer.py    compositing one frame (ground shadow + layers)
+   ├── widget.py      the frameless/translucent/always-on-top window
+   └── assets/        the artwork: manifest.json + layers/*.svg
 ├── ai/                conversational AI — Stage 3, interface only
 ├── voice/             voice input (Stage 4) + TTS (Stage 5), interface only
 ├── emotions/          PAD emotional-state model (real data model at Stage 0)
@@ -157,13 +202,18 @@ peeko/
 ├── memory/            persistent memory — Stage 4, interface only
 ├── awareness/         active-app awareness — Stage 8, interface only
 ├── db/                SQLite connection + schema versioning (real at Stage 0)
-└── ui/                menus/dialogs (context menu with Quit at Stage 0)
+└── ui/                menus/dialogs (right-click context menu with Quit)
 ```
 
-**How they relate at Stage 0:**
+**How they relate at Stage 1:**
 
 - `__main__` → `app` → `settings` + `paths` + `logging_setup` + `errors`
   → `avatar` (window) + `ui` (menu).
+- Inside `avatar`: the window loads `manifest.json` → rasterises its SVG
+  layers into pixmaps → runs the animation state machine on a `QTimer`
+  (33 fps), repainting only when the frame actually changes. The engine
+  (`state_machine.py`) never imports Qt, which is why it is unit-testable
+  without a display.
 - `db` is wired and tested now so Stages 4/7 can persist memory and needs
   without rework.
 - `emotions` and `needs` ship as real, unit-tested data models that later
@@ -174,16 +224,29 @@ peeko/
 
 ## Current development stage
 
-**Stage 0 of 13 — project foundation (this milestone).** The full owner
-roadmap: 1 avatar → 2 interaction → 3 AI chat → 4 voice input → 5 TTS →
-6 emotions → 7 needs → 8 memory → 9 app awareness → 10 autonomous life →
-11 polish → 12 packaging → 13 final testing. Each stage is built, tested,
-documented, committed and pushed before the next begins.
+**Stage 1 of 13 — desktop robot avatar (completed).** Stage 0 delivered the
+project foundation (modular package, settings, logging, errors, SQLite,
+tests, smoke test). Stage 1 turned the placeholder window into a real little
+character: a frameless translucent always-on-top robot, drawn from a
+data-driven artwork manifest, with a timer-driven animation state machine
+(idle bob, blinking, self-initiated glances and cursor glances, click
+squash-and-bounce, drag wiggle) and click-vs-drag mouse handling.
+
+The full owner roadmap: 1 avatar → 2 interaction → 3 AI chat → 4 voice
+input → 5 TTS → 6 emotions → 7 needs → 8 memory → 9 app awareness →
+10 autonomous life → 11 polish → 12 packaging → 13 final testing. Each
+stage is built, tested, documented, committed and pushed before the next
+begins.
 
 ## Known limitations
 
-- The avatar is a **static placeholder shape** — animation arrives at
-  Stage 1/2; emotions at Stage 6.
+- The artwork is a **cute placeholder robot** drawn as SVG layers. It is
+  meant to be replaced — see
+  [Avatar artwork](#avatar-artwork--swap-in-your-own-robot). Nothing about
+  the placeholder is hard-coded in the engine.
+- The character only knows its Stage 1 behaviours (idle, blink, glance,
+  click, drag). It cannot chat, feel or need anything yet — those are
+  Stages 3–7.
 - **AI chat, voice input, TTS, persistent memory and app awareness are not
   implemented yet** — their config variables exist but have no effect, and
   their interfaces raise `NotImplementedError` on purpose.

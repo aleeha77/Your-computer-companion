@@ -39,6 +39,12 @@ peeko = "peeko.app:main"
 [tool.setuptools.packages.find]
 include = ["peeko*"]
 
+# The avatar is data-driven, so its artwork MUST ship with the package:
+# without this, `pip install .` would produce an avatar with no SVG layers
+# and no manifest to read.
+[tool.setuptools.package-data]
+"peeko.avatar" = ["assets/*.json", "assets/*.md", "assets/layers/*.svg"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

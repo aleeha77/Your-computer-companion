@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="180" viewBox="0 0 160 180">
+  <!-- Eyes: fully closed (resting blink). -->
+  <path d="M53 85 Q61.5 89 71 85" fill="none" stroke="#17252E" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M89 85 Q98.5 89 107 85" fill="none" stroke="#17252E" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

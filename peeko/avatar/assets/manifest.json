@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "canvas": {"width": 160, "height": 180},
+  "z_order": ["body", "eyes"],
+  "layer_defaults": {
+    "body": "layers/body.svg",
+    "eyes": "layers/eyes_open.svg"
+  },
+  "state_animation_map": {
+    "idle": "idle",
+    "blink": "blink",
+    "look_left": "look_left",
+    "look_right": "look_right",
+    "look_up": "look_up",
+    "look_down": "look_down",
+    "click": "click",
+    "dragging": "dragging"
+  },
+  "animations": {
+    "idle": {
+      "loop": true,
+      "frames": [
+        {"duration_ms": 1300},
+        {"dy": 2, "duration_ms": 350},
+        {"duration_ms": 550}
+      ]
+    },
+    "blink": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_half.svg",   "duration_ms": 60},
+        {"eyes": "layers/eyes_closed.svg", "duration_ms": 120},
+        {"eyes": "layers/eyes_half.svg",   "duration_ms": 60},
+        {"eyes": "layers/eyes_open.svg",   "duration_ms": 80}
+      ]
+    },
+    "look_left": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_look_left.svg", "duration_ms": 1400}
+      ]
+    },
+    "look_right": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_look_right.svg", "duration_ms": 1400}
+      ]
+    },
+    "look_up": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_look_up.svg", "duration_ms": 1400}
+      ]
+    },
+    "look_down": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_look_down.svg", "duration_ms": 1400}
+      ]
+    },
+    "click": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_happy.svg", "dy": 4,  "duration_ms": 80},
+        {"eyes": "layers/eyes_happy.svg", "dy": -8, "duration_ms": 150},
+        {"eyes": "layers/eyes_happy.svg", "dy": -4, "duration_ms": 90},
+        {"eyes": "layers/eyes_open.svg",  "dy": -10, "duration_ms": 130},
+        {"eyes": "layers/eyes_open.svg",  "dy": 0,  "duration_ms": 110}
+      ]
+    },
+    "dragging": {
+      "loop": true,
+      "frames": [
+        {"eyes": "layers/eyes_look_up.svg", "dy": 2, "duration_ms": 260},
+        {"eyes": "layers/eyes_look_up.svg", "dy": 5, "duration_ms": 260},
+        {"eyes": "layers/eyes_look_up.svg", "dy": 2, "duration_ms": 260}
+      ]
+    }
+  }
+}

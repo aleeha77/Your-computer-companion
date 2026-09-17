@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="180" viewBox="0 0 160 180">
+  <!-- Eyes: happy "closed-smile" arcs (click reaction). -->
+  <path d="M51 85 Q62 71 73 85" fill="none" stroke="#17252E" stroke-width="4" stroke-linecap="round"/>
+  <path d="M87 85 Q98 71 109 85" fill="none" stroke="#17252E" stroke-width="4" stroke-linecap="round"/>
+</svg>
