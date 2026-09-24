@@ -54,7 +54,10 @@ def _install_signal_handlers(app) -> None:
     are silently lost. We therefore attach them to the ``app`` object.
     """
     def _quit(*_args) -> None:
-        LOG.info("Received termination signal — quitting.")
+        # Whichever signal path wins — this plain handler or the wakeup-fd
+        # bridge below — is a race, so both log the same phrase (and both
+        # simply quit). Nothing depends on which one runs first.
+        LOG.info("Termination signal received — quitting.")
         app.quit()
 
     try:

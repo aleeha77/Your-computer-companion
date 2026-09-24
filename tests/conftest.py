@@ -157,7 +157,7 @@ def write_avatar_assets(root: Path, manifest: dict) -> Path:
 
 
 def minimal_manifest() -> dict:
-    """A fresh, valid manifest describing the eight Stage 1 states.
+    """A fresh, valid manifest describing the Stage 1 + Stage 2 states.
 
     Durations are deliberately short (100 ms) so the timer-driven state
     machine can be tested by feeding it synthetic time instead of waiting.
@@ -213,6 +213,29 @@ def minimal_manifest() -> dict:
                 "frames": [
                     {"dy": 2, "duration_ms": 100},
                     {"dy": 4, "duration_ms": 100},
+                ],
+            },
+            # -- Stage 2 reactions ----------------------------------------- #
+            "hover": {
+                "loop": False,
+                "frames": [
+                    {"eyes": "layers/eyes_half.svg", "dy": -2, "duration_ms": 100},
+                    {"eyes": "layers/eyes_open.svg", "duration_ms": 100},
+                ],
+            },
+            "double_click": {
+                "loop": False,
+                "frames": [
+                    {"eyes": "layers/eyes_happy.svg", "dy": -6, "duration_ms": 100},
+                    {"eyes": "layers/eyes_wink.svg", "dy": -3, "duration_ms": 100},
+                    {"eyes": "layers/eyes_open.svg", "duration_ms": 100},
+                ],
+            },
+            "confused": {
+                "loop": False,
+                "frames": [
+                    {"eyes": "layers/eyes_half.svg", "dx": -2, "duration_ms": 100},
+                    {"eyes": "layers/eyes_half.svg", "dx": 2, "duration_ms": 100},
                 ],
             },
         },

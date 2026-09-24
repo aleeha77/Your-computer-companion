@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="180" viewBox="0 0 160 180">
+  <!-- Eyes: wink (left eye open, right eye a happy arc) — double-click reaction. -->
+  <ellipse cx="62" cy="82" rx="10" ry="13" fill="#FFFFFF" stroke="#2B7A78" stroke-width="1.5"/>
+  <ellipse cx="62" cy="84" rx="4.2" ry="5.5" fill="#17252E"/>
+  <path d="M87 85 Q98 71 109 85" fill="none" stroke="#17252E" stroke-width="4" stroke-linecap="round"/>
+</svg>

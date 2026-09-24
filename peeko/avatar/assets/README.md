@@ -73,10 +73,18 @@ A frame that lists no layer overrides uses `layer_defaults` as-is.
 
 ## Built-in state → animation names
 
-The Stage 1 state machine plays: `idle`, `blink`, `look_left`,
-`look_right`, `look_up`, `look_down`, `click`, `dragging`. Any of these can
-be remapped via `state_animation_map`, or re-arted by editing the
-animations directly.
+The state machine plays these animations (each name is also the default
+animation it uses, and any of them can be remapped via
+`state_animation_map`, or re-arted by editing the animations directly):
+
+| Kind     | States                                                             | Required? |
+| -------- | ------------------------------------------------------------------ | --------- |
+| Core     | `idle`, `blink`, `look_left`, `look_right`, `look_up`, `look_down`, `click`, `dragging` | **Yes** — a missing one fails loudly at startup |
+| Reaction | `hover` (pointer enters), `double_click`, `confused` (a menu entry that is not implemented yet) | No — a missing one simply switches that reaction off |
+
+Reactions are one-shot animations that return to `idle` when they finish.
+They are deliberately optional so artwork written for Stage 1 keeps working
+unchanged; it just has fewer reactions.
 
 ## Tips
 

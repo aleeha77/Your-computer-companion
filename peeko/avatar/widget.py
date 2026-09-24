@@ -1,8 +1,8 @@
 """Avatar subsystem: the on-screen robot companion.
 
-Stage 1: the avatar is now a real little character — a transparent,
-frameless, always-on-top window that renders the animated robot described
-by ``peeko/avatar/assets/manifest.json`` and driven by the
+Stage 1: the avatar is a real little character — a transparent, frameless,
+always-on-top window that renders the animated robot described by
+``peeko/avatar/assets/manifest.json`` and driven by the
 :class:`~peeko.avatar.state_machine.AvatarStateMachine`:
 
 * gentle idle bob (looping animation from the manifest);
@@ -10,12 +10,22 @@ by ``peeko/avatar/assets/manifest.json`` and driven by the
 * occasional looks left/right/up/down, plus glancing toward the mouse
   cursor when it hovers nearby;
 * a happy squash-and-bounce when clicked;
-* a "being carried" wiggle while dragged anywhere on the desktop;
-* right-click context menu / Ctrl+Q / window close quit.
+* a "being carried" wiggle while dragged anywhere on the desktop.
+
+Stage 2 adds the interaction layer:
+
+* a subtle **hover** reaction when the pointer enters the window (it never
+  interferes with a click or a drag, and ends when the pointer leaves);
+* a distinct **double-click** reaction (a bigger, winkier bounce);
+* the full right-click **interaction menu** — Check Status and Settings open
+  real, honest windows; the planned pet actions are labelled as not
+  implemented and answer with an explanation plus a "huh?" reaction;
+* right-click menu / Ctrl+Q / window close quit, exactly as before.
 
 Everything animation-related runs on ``QTimer`` callbacks — no sleeps, no
-blocking calls. AI/voice/needs input arrives in later stages as new states
-on the same machine.
+blocking calls. Dialogs are opened asynchronously (``open()``/``show()``),
+so nothing ever blocks the animation loop. AI/voice/needs input arrives in
+later stages as new states on the same machine.
 """
 
 from __future__ import annotations
@@ -37,7 +47,18 @@ from peeko.avatar.assets import AssetLibrary
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.renderer import draw_frame
 from peeko.avatar.state_machine import IDLE, AvatarStateMachine
-from peeko.ui.context_menu import build_avatar_context_menu
+from peeko.ui.context_menu import (
+    QUIT_ID,
+    SETTINGS_ID,
+    STATUS_ID,
+    build_avatar_context_menu,
+    find_entry,
+)
+from peeko.ui.dialogs import (
+    show_not_implemented_dialog,
+    show_settings_dialog,
+    show_status_dialog,
+)
 
 LOG = logging.getLogger("peeko.avatar")
 
@@ -63,6 +84,9 @@ class AvatarWindow(QWidget):
     """
 
     quitRequested = Signal()
+    #: Emitted when a menu entry that is not implemented yet is chosen
+    #: (carries the entry id) — useful for logging and tests.
+    notImplementedRequested = Signal(str)
 
     def __init__(self, settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -72,6 +96,8 @@ class AvatarWindow(QWidget):
         self._press_active = False
         self._drag_active = False
         self._last_frame_key: tuple | None = None
+        self._dialogs: list = []
+        self._settings_dialog = None
 
         # ---- asset pipeline: manifest -> pixmaps -> machine ---------------- #
         # ``PEEKO_AVATAR_ASSETS_DIR`` lets the owner point Peeko at their own
@@ -177,18 +203,43 @@ class AvatarWindow(QWidget):
         painter.end()
 
     # ------------------------------------------------------------------ #
-    # Mouse interaction (click vs drag)
+    # Mouse interaction (hover / click / double-click vs drag)
     # ------------------------------------------------------------------ #
+    def enterEvent(self, _event) -> None:  # noqa: N802 - Qt naming
+        """Pointer entered the avatar -> a subtle "oh!" reaction.
+
+        The state machine decides whether it is a good moment (it stays
+        quiet while a press/drag is in flight), so this never interferes
+        with clicking or dragging.
+        """
+        if self._machine.hover_enter():
+            LOG.debug("Hover reaction triggered.")
+
+    def leaveEvent(self, _event) -> None:  # noqa: N802 - Qt naming
+        """Pointer left the avatar -> end a running hover reaction at once."""
+        if self._machine.hover_leave():
+            LOG.debug("Hover reaction cut short by pointer leaving.")
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if event.button() == Qt.LeftButton:
-            self._press_active = True
-            self._drag_active = False
-            self._press_global = event.globalPosition().toPoint()
-            self._drag_offset = (
-                self._press_global - self.frameGeometry().topLeft()
-            )
-            self._machine.press()
+            self._arm_press(event.globalPosition().toPoint())
             event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """A double-click plays its own, more excited reaction.
+
+        Qt delivers press -> release (which already fired the single-click
+        reaction) -> double-click -> release. Re-arming the press here keeps
+        "double-click and then drag" working, and the state machine refuses
+        to downgrade the double-click reaction to a plain click when the
+        following release arrives.
+        """
+        if event.button() != Qt.LeftButton:
+            return
+        self._arm_press(event.globalPosition().toPoint())
+        if self._machine.double_click():
+            LOG.debug("Double-click reaction triggered.")
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if not (self._press_active and event.buttons() & Qt.LeftButton):
@@ -211,15 +262,74 @@ class AvatarWindow(QWidget):
             self._drag_active = False
             event.accept()
 
+    def _arm_press(self, global_pos: QPoint) -> None:
+        """Remember where a left-button interaction started (click or drag)."""
+        self._press_active = True
+        self._drag_active = False
+        self._press_global = global_pos
+        self._drag_offset = global_pos - self.frameGeometry().topLeft()
+        self._machine.press()
+
     # ------------------------------------------------------------------ #
-    # Context menu / quit
+    # Interaction menu / dialogs / quit
     # ------------------------------------------------------------------ #
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._menu.exec(event.globalPos())
 
     def _on_menu_triggered(self, action) -> None:
-        if action.data() == "quit":
+        """Dispatch a menu entry by its stable id (see ``ui.context_menu``)."""
+        action_id = action.data()
+        entry = find_entry(action_id)
+        if action_id == QUIT_ID:
             self.quitRequested.emit()
+        elif action_id == STATUS_ID:
+            self._show_status()
+        elif action_id == SETTINGS_ID:
+            self._show_settings()
+        elif entry is not None and not entry.implemented:
+            self._on_not_implemented(entry)
+        else:  # pragma: no cover - defensive: unknown action id
+            LOG.warning("Unknown menu action id: %r", action_id)
+
+    def _show_status(self) -> None:
+        """Check Status: an honest readout of live state."""
+        LOG.info("Showing status readout.")
+        self._keep_dialog(
+            show_status_dialog(
+                self, self._settings, machine=self._machine,
+                manifest=self._manifest,
+            )
+        )
+
+    def _show_settings(self) -> None:
+        """Settings: the (read-only) configuration Peeko is running with."""
+        LOG.info("Showing settings window.")
+        if self._settings_dialog is None:
+            self._settings_dialog = show_settings_dialog(self, self._settings)
+        else:
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+
+    def _on_not_implemented(self, entry) -> None:
+        """A planned action: react honestly instead of pretending."""
+        LOG.info("Menu entry %r is not implemented (Stage %s).",
+                 entry.id, entry.stage)
+        self._machine.confused()
+        self.notImplementedRequested.emit(entry.id)
+        self._keep_dialog(show_not_implemented_dialog(self, entry))
+
+    def _keep_dialog(self, dialog) -> None:
+        """Hold a reference so an async dialog isn't collected mid-display."""
+        alive = []
+        for existing in self._dialogs:
+            try:
+                if existing.isVisible():
+                    alive.append(existing)
+            except RuntimeError:  # pragma: no cover - already deleted by Qt
+                continue
+        alive.append(dialog)
+        self._dialogs = alive
 
     def _quit(self) -> None:
         LOG.info("Quit requested — closing avatar window.")

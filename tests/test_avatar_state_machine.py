@@ -23,14 +23,18 @@ from peeko.avatar.state_machine import (
     BLINK,
     BLINK_MAX_MS,
     CLICK,
+    CONFUSED,
     DEFAULT_STATE_ANIMATIONS,
+    DOUBLE_CLICK,
     DRAGGING,
+    HOVER,
     IDLE,
     LOOK_DOWN,
     LOOK_LEFT,
     LOOK_MAX_MS,
     LOOK_RIGHT,
     LOOK_UP,
+    REACTION_STATES,
     AvatarStateMachine,
 )
 from peeko.errors import StartupError
@@ -353,3 +357,302 @@ def test_ticks_never_block(machine):
     start = time.monotonic()
     advance(machine, 60_000.0, step=100.0)  # a minute of animation
     assert time.monotonic() - start < 2.0
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: hover reaction
+# --------------------------------------------------------------------------- #
+def test_stage_two_reactions_are_available_from_the_manifest(machine):
+    assert machine.available_reactions == frozenset(REACTION_STATES)
+    for state in REACTION_STATES:
+        assert machine.reaction_available(state)
+        assert machine.state_animation_map[state] == state
+
+
+def test_hover_enter_plays_the_hover_reaction(machine):
+    assert machine.hover_enter() is True
+    assert machine.state == HOVER
+    assert machine.current_animation == "hover"
+    assert machine.hovering is True
+
+
+def test_hover_reaction_is_a_one_shot_that_returns_to_idle(machine):
+    machine.hover_enter()
+    assert machine.state == HOVER
+    wait_for_idle(machine)
+    assert machine.state == IDLE
+    assert machine.frame_index == 0
+
+
+def test_hover_enter_is_idempotent_until_the_pointer_leaves(machine):
+    assert machine.hover_enter() is True
+    wait_for_idle(machine)
+    # Still hovering: the reaction must not fire over and over.
+    assert machine.hover_enter() is False
+    assert machine.state == IDLE
+    machine.hover_leave()
+    assert machine.hover_enter() is True
+    assert machine.state == HOVER
+
+
+def test_hover_enter_is_ignored_while_the_mouse_is_pressed(machine):
+    """Hovering must never interfere with a click or a drag."""
+    machine.press()
+    assert machine.hover_enter() is False
+    assert machine.state == IDLE           # a press alone stays silent
+    assert machine.hovering is True        # ...but the hover is remembered
+    # The click still works exactly as it did before.
+    machine.release(moved=False)
+    assert machine.state == CLICK
+
+
+def test_hover_enter_is_ignored_while_dragging(machine):
+    machine.press()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+    assert machine.hover_enter() is False
+    assert machine.state == DRAGGING       # the carry wiggle keeps playing
+    machine.release(moved=True)
+    assert machine.state == IDLE
+
+
+def test_hover_enter_does_not_interrupt_another_animation(machine):
+    machine.press()
+    machine.release(moved=False)
+    assert machine.state == CLICK
+    assert machine.hover_enter() is False
+    assert machine.state == CLICK          # the click reaction finishes
+
+
+def test_hover_leave_ends_the_reaction_immediately(machine):
+    machine.hover_enter()
+    assert machine.state == HOVER
+    assert machine.hover_leave() is True
+    assert machine.state == IDLE
+    assert machine.hovering is False
+    # Leaving twice (or while idle) is a harmless no-op.
+    assert machine.hover_leave() is False
+
+
+def test_hover_leave_leaves_other_animations_alone(machine):
+    machine.double_click()
+    assert machine.state == DOUBLE_CLICK
+    assert machine.hover_leave() is False
+    assert machine.state == DOUBLE_CLICK
+
+
+def test_hover_does_not_break_the_pointer_glance_cooldown(machine):
+    """A hover reaction must not eat the glance cooldown (or vice versa)."""
+    machine.hover_enter()
+    assert machine.state == HOVER
+    # A glance request while the hover reaction plays is ignored and does
+    # NOT consume the cooldown: the engine only spends it on a real glance.
+    machine.pointer_direction("left")
+    assert machine.state == HOVER
+    wait_for_idle(machine)
+    machine.pointer_direction("left")
+    assert machine.state == LOOK_LEFT
+
+    # ...and the cooldown still applies after the glance, hover or not.
+    wait_for_idle(machine)
+    machine.hover_leave()
+    assert machine.hover_enter() is True
+    wait_for_idle(machine)
+    machine.pointer_direction("right")
+    assert machine.state == IDLE
+
+
+def test_pointer_glances_still_work_after_a_hover_reaction(machine):
+    machine.hover_enter()
+    wait_for_idle(machine)
+    advance(machine, state_machine.POINTER_LOOK_COOLDOWN_MS + 100)
+    wait_for_idle(machine)
+    machine.pointer_direction("up")
+    assert machine.state == LOOK_UP
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: double-click reaction
+# --------------------------------------------------------------------------- #
+def test_double_click_plays_its_own_reaction(machine):
+    assert machine.double_click() is True
+    assert machine.state == DOUBLE_CLICK
+    assert machine.current_animation == "double_click"
+    assert machine.current_animation != machine.manifest.animations[CLICK].name
+
+
+def test_double_click_reaction_is_a_one_shot(machine):
+    machine.double_click()
+    wait_for_idle(machine)
+    assert machine.state == IDLE
+
+
+def test_double_click_replays_from_the_first_frame(machine):
+    machine.double_click()
+    advance(machine, 150.0)                # past the first 100 ms frame
+    assert machine.frame_index == 1
+    machine.double_click()                 # click it again, quickly
+    assert machine.state == DOUBLE_CLICK
+    assert machine.frame_index == 0
+
+
+def test_double_click_release_is_not_downgraded_to_a_single_click(machine):
+    """Qt sends release → double-click → release; the reaction must survive."""
+    machine.press()
+    machine.release(moved=False)
+    assert machine.state == CLICK          # the first release of the pair
+    machine.press()
+    machine.double_click()
+    assert machine.state == DOUBLE_CLICK
+    machine.release(moved=False)           # the second release
+    assert machine.state == DOUBLE_CLICK
+    wait_for_idle(machine)
+    assert machine.state == IDLE
+
+
+def test_double_click_is_ignored_while_dragging(machine):
+    machine.press()
+    machine.drag_started()
+    assert machine.double_click() is False
+    assert machine.state == DRAGGING
+
+
+def test_double_click_can_still_be_dragged_afterwards(machine):
+    """A double-click re-arms the press, so dragging it still works."""
+    machine.press()
+    machine.double_click()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+    machine.release(moved=True)
+    assert machine.state == IDLE
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: "not implemented" reaction
+# --------------------------------------------------------------------------- #
+def test_confused_reaction_plays_once_then_returns_to_idle(machine):
+    assert machine.confused() is True
+    assert machine.state == CONFUSED
+    assert machine.current_animation == "confused"
+    wait_for_idle(machine)
+    assert machine.state == IDLE
+
+
+def test_confused_reaction_replays_on_each_menu_pick(machine):
+    machine.confused()
+    advance(machine, 150.0)                # past the first 100 ms frame
+    assert machine.frame_index == 1
+    machine.confused()
+    assert machine.frame_index == 0
+
+
+def test_confused_reaction_does_not_interrupt_a_drag(machine):
+    machine.press()
+    machine.drag_started()
+    assert machine.confused() is False
+    assert machine.state == DRAGGING
+
+
+def test_play_reaction_rejects_an_unknown_state(machine):
+    assert machine.play_reaction("nope") is False
+    assert machine.state == IDLE
+
+
+def test_reaction_states_are_not_scheduled_on_their_own(machine):
+    """Only idle schedules spontaneous blinks/glances — never reactions."""
+    seen = {machine.state}
+    for _ in range(4000):                  # 40 s of animation
+        machine.tick(STEP_MS)
+        seen.add(machine.state)
+        assert machine.state not in REACTION_STATES or machine.hovering
+    assert HOVER not in seen
+    assert DOUBLE_CLICK not in seen
+    assert CONFUSED not in seen
+
+
+def test_scheduled_timers_resume_after_a_reaction(machine):
+    assert machine.blink_in_ms is not None
+    machine.hover_enter()
+    assert machine.blink_in_ms is None      # reactions pause the schedule
+    wait_for_idle(machine)
+    assert machine.blink_in_ms is not None
+    advance_until(machine, lambda: machine.state == BLINK, BLINK_MAX_MS + 1000)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: reactions are optional artwork
+# --------------------------------------------------------------------------- #
+def _manifest_without(avatar_assets, manifest_data, *animation_names):
+    """Rewrite the test manifest with ``animation_names`` removed."""
+    from conftest import write_avatar_assets
+
+    for name in animation_names:
+        manifest_data["animations"].pop(name, None)
+    return write_avatar_assets(Path(avatar_assets).parent, manifest_data)
+
+
+def test_reactions_are_switched_off_when_the_manifest_lacks_them(
+    avatar_assets, manifest_data
+):
+    """Stage 1 artwork keeps working — it just has fewer reactions."""
+    path = _manifest_without(
+        avatar_assets, manifest_data, "hover", "double_click", "confused"
+    )
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.available_reactions == frozenset()
+    assert machine.reaction_available(HOVER) is False
+    loaded = machine.state_animation_map
+    assert HOVER not in loaded and DOUBLE_CLICK not in loaded
+    assert CONFUSED not in loaded
+
+    # Every reaction entry point stays silent instead of raising.
+    assert machine.hover_enter() is False
+    assert machine.double_click() is False
+    assert machine.confused() is False
+    assert machine.state == IDLE
+    assert machine.current_animation == "idle"
+
+
+def test_a_missing_reaction_only_switches_off_that_reaction(
+    avatar_assets, manifest_data
+):
+    """Reactions are independent: losing one leaves the others working."""
+    path = _manifest_without(avatar_assets, manifest_data, "hover")
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.reaction_available(HOVER) is False
+    assert HOVER not in machine.state_animation_map
+    assert machine.hover_enter() is False
+    assert machine.state == IDLE
+
+    assert machine.reaction_available(DOUBLE_CLICK) is True
+    assert machine.reaction_available(CONFUSED) is True
+    assert machine.double_click() is True
+    assert machine.current_animation == "double_click"
+
+
+def test_a_reaction_state_can_be_remapped_by_the_manifest(
+    avatar_assets, manifest_data
+):
+    from conftest import write_avatar_assets
+
+    manifest_data["state_animation_map"] = {"double_click": "click"}
+    path = write_avatar_assets(Path(avatar_assets).parent, manifest_data)
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.reaction_available(DOUBLE_CLICK) is True
+    assert machine.state_animation_map[DOUBLE_CLICK] == "click"
+    machine.double_click()
+    assert machine.current_animation == "click"
+
+
+def test_a_missing_core_animation_still_fails_loudly(
+    avatar_assets, manifest_data
+):
+    """Optional reactions must not weaken the mandatory-state check."""
+    path = _manifest_without(
+        avatar_assets, manifest_data, "hover", "dragging"
+    )
+    with pytest.raises(StartupError, match="dragging"):
+        AvatarStateMachine(load_manifest(path))

@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPainter
 
 from peeko.avatar.assets import AssetLibrary
 from peeko.avatar.manifest import load_manifest
@@ -92,6 +94,88 @@ def test_packaged_manifest_declares_looping_and_one_shot_animations():
     assert manifest.animations["dragging"].loop is True
     for name in ("blink", "click", "look_left", "look_up"):
         assert manifest.animations[name].loop is False
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: the packaged reaction artwork
+# --------------------------------------------------------------------------- #
+def test_packaged_manifest_ships_every_stage_2_reaction():
+    """The artwork for hover / double-click / confused is really packaged.
+
+    Without these animations the reactions would silently switch off, so
+    the packaged manifest is checked against the state machine itself
+    (``available_reactions``) rather than against a hand-written list.
+    """
+    from peeko.avatar.state_machine import (
+        CONFUSED,
+        DOUBLE_CLICK,
+        HOVER,
+        AvatarStateMachine,
+    )
+
+    manifest = load_manifest(PACKAGED_MANIFEST)
+    for name in (HOVER, DOUBLE_CLICK, CONFUSED):
+        assert name in manifest.animations, f"missing animation {name!r}"
+        assert manifest.animations[name].frames, f"{name!r} has no frames"
+        # Every reaction is a one-shot: it settles back to idle afterwards.
+        assert manifest.animations[name].loop is False
+
+    machine = AvatarStateMachine(manifest)
+    assert machine.available_reactions == frozenset(
+        {HOVER, DOUBLE_CLICK, CONFUSED}
+    )
+
+
+def test_packaged_double_click_frames_load_including_the_wink_layer(qapp):
+    """The new wink eye layer resolves, parses and renders as a pixmap."""
+    from peeko.avatar.state_machine import DOUBLE_CLICK
+
+    manifest = load_manifest(PACKAGED_MANIFEST)
+    library = AssetLibrary(manifest)
+    library.load()
+
+    wink = "layers/eyes_wink.svg"
+    used: set[str] = set()
+    for frame in manifest.animations[DOUBLE_CLICK].frames:
+        used.update(frame.layer_files.values())
+        layers = library.frame_layers(frame)
+        assert len(layers) == len(manifest.z_order)
+        for _name, pixmap in layers:
+            assert not pixmap.isNull()
+    assert wink in used, "the wink layer is no longer part of double_click"
+    assert (manifest.base_dir / wink).is_file()
+
+
+def test_every_stage_2_reaction_animation_renders(qapp):
+    """Each reaction frame paints through the real render path."""
+    from peeko.avatar.renderer import draw_frame
+    from peeko.avatar.state_machine import CONFUSED, DOUBLE_CLICK, HOVER
+
+    manifest = load_manifest(PACKAGED_MANIFEST)
+    library = AssetLibrary(manifest)
+    library.load()
+
+    for name in (HOVER, DOUBLE_CLICK, CONFUSED):
+        for frame in manifest.animations[name].frames:
+            image = QImage(
+                manifest.canvas_width,
+                manifest.canvas_height,
+                QImage.Format_ARGB32_Premultiplied,
+            )
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            try:
+                draw_frame(painter, library, frame)
+            finally:
+                painter.end()
+            assert not image.isNull()
+            opaque = sum(
+                1
+                for y in range(0, image.height(), 8)
+                for x in range(0, image.width(), 8)
+                if image.pixelColor(x, y).alpha() > 0
+            )
+            assert opaque > 0, f"{name}: nothing was painted"
 
 
 # --------------------------------------------------------------------------- #
