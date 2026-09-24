@@ -16,15 +16,36 @@ States (name == the animation played while in that state, unless
   clicked.
 * ``dragging``    — looping "being carried" wiggle while the user drags.
 
+Stage 2 adds three **reaction** states (one-shot, and on top of the core
+set above):
+
+* ``hover``       — a brief "oh!" (half-closed eyes + a tiny lift) when the
+  pointer enters the avatar window; it never interrupts a click or a drag,
+  and the reaction ends the moment the pointer leaves.
+* ``double_click`` — a bigger, more excited bounce than a single click.
+* ``confused``    — a quick "huh?" head-shake, played when the user picks a
+  part of the menu that is not implemented yet.
+
+Reaction states are *optional*: a hand-made artwork manifest that omits
+their animations still runs, it simply has fewer reactions (see
+:meth:`AvatarStateMachine.available_reactions`). The core states above are
+mandatory — a manifest missing one of them fails loudly at startup.
+
 Transitions (all timers are decremented by :meth:`tick`, so nothing ever
 blocks; there are no sleeps anywhere):
 
 * ``idle`` -> ``blink`` / ``look_*``  (randomised timers)
 * ``idle`` -> ``look_*``              (pointer glance, cooldown-limited)
+* ``hover_enter()``                   (``idle`` -> ``hover``; ignored while
+  pressed/dragging or when another animation is playing)
+* ``hover_leave()``                   (``hover`` -> ``idle``, immediately)
 * ``press()``                         (arms the interaction; no visual change)
 * ``drag_started()``                  (any state -> ``dragging``)
 * ``release(moved=True)``             (``dragging`` -> ``idle``)
-* ``release(moved=False)``            (``idle``/``blink``/``look_*`` -> ``click``)
+* ``release(moved=False)``            (``idle``/``blink``/``look_*`` -> ``click``;
+  a ``double_click`` reaction in progress is never downgraded to a click)
+* ``double_click()``                  (-> ``double_click``, replays on repeat)
+* ``confused()``                      (-> ``confused``)
 * any one-shot animation finishing    (-> ``idle``)
 
 The machine is Qt-free so it is trivially unit-testable; the Qt widget
@@ -52,6 +73,11 @@ LOOK_DOWN = "look_down"
 CLICK = "click"
 DRAGGING = "dragging"
 
+# -- Stage 2 reaction states ------------------------------------------------- #
+HOVER = "hover"
+DOUBLE_CLICK = "double_click"
+CONFUSED = "confused"
+
 LOOK_DIRECTIONS = (LOOK_LEFT, LOOK_RIGHT, LOOK_UP, LOOK_DOWN)
 
 #: Animation-state names the engine always needs; the manifest (or the
@@ -59,6 +85,14 @@ LOOK_DIRECTIONS = (LOOK_LEFT, LOOK_RIGHT, LOOK_UP, LOOK_DOWN)
 REQUIRED_STATES = frozenset(
     {IDLE, BLINK, *LOOK_DIRECTIONS, CLICK, DRAGGING}
 )
+
+#: Animations a reaction state may play: by convention the state's own name
+#: (``hover`` → the ``hover`` animation), overridable per state through the
+#: manifest's ``state_animation_map``. A reaction whose animation the
+#: manifest does not provide is simply switched off (it never raises), so
+#: artwork manifests written for Stage 1 keep working unchanged — they just
+#: have fewer reactions.
+REACTION_STATES = (HOVER, DOUBLE_CLICK, CONFUSED)
 
 #: Built-in state -> animation mapping (a manifest ``state_animation_map``
 #: may override any entry).
@@ -71,6 +105,9 @@ DEFAULT_STATE_ANIMATIONS: dict[str, str] = {
     LOOK_DOWN: LOOK_DOWN,
     CLICK: CLICK,
     DRAGGING: DRAGGING,
+    HOVER: HOVER,
+    DOUBLE_CLICK: DOUBLE_CLICK,
+    CONFUSED: CONFUSED,
 }
 
 # --------------------------------------------------------------------------- #
@@ -99,14 +136,16 @@ class AvatarStateMachine:
     rng: random.Random = field(default_factory=random.Random)
 
     def __post_init__(self) -> None:
-        self._state_map = dict(DEFAULT_STATE_ANIMATIONS)
-        if self.manifest.state_animation_map:
-            self._state_map.update(self.manifest.state_animation_map)
+        overrides = dict(self.manifest.state_animation_map or {})
+        state_map = dict(DEFAULT_STATE_ANIMATIONS)
+        state_map.update(overrides)
+        available = set(self.manifest.animations)
 
-        missing_states = sorted(REQUIRED_STATES - set(self._state_map))
+        # -- core states: mandatory, a missing one is a startup error ----- #
+        missing_states = sorted(REQUIRED_STATES - set(state_map))
         bad_anims = sorted(
-            name for name in self._state_map.values()
-            if name not in self.manifest.animations
+            name for state, name in state_map.items()
+            if state in REQUIRED_STATES and name not in available
         )
         if missing_states or bad_anims:
             parts = []
@@ -123,6 +162,17 @@ class AvatarStateMachine:
                 + ". Add the missing animations to the asset manifest."
             )
 
+        # -- reaction states: optional, off unless the artwork provides them - #
+        reaction_map: dict[str, str] = {}
+        for state in REACTION_STATES:
+            chosen = state_map.get(state)
+            if chosen in available:
+                reaction_map[state] = chosen
+            else:
+                state_map.pop(state, None)   # reaction switched off
+
+        self._state_map = state_map
+        self._reaction_states = frozenset(reaction_map)
         self._animations: dict[str, Animation] = {
             state: self.manifest.animations[name]
             for state, name in self._state_map.items()
@@ -137,6 +187,7 @@ class AvatarStateMachine:
         self._look_in_ms = self.rng.uniform(LOOK_MIN_MS, LOOK_MAX_MS)
         self._press_active = False
         self._last_pointer_ms = -POINTER_LOOK_COOLDOWN_MS
+        self._hovering = False
 
     # ------------------------------------------------------------------ #
     # Introspection
@@ -174,8 +225,31 @@ class AvatarStateMachine:
 
     @property
     def state_animation_map(self) -> dict[str, str]:
-        """Effective state -> animation mapping (defaults + manifest)."""
+        """Effective state -> animation mapping (defaults + manifest).
+
+        Reaction states the manifest cannot supply are absent — they are
+        switched off rather than pointing at a non-existent animation.
+        """
         return dict(self._state_map)
+
+    @property
+    def available_reactions(self) -> frozenset[str]:
+        """Reaction states this manifest can actually play."""
+        return self._reaction_states
+
+    def reaction_available(self, state: str) -> bool:
+        """Is ``state`` a reaction this machine can play right now?"""
+        return state in self._reaction_states
+
+    @property
+    def hovering(self) -> bool:
+        """True between :meth:`hover_enter` and :meth:`hover_leave`."""
+        return self._hovering
+
+    @property
+    def is_pressed(self) -> bool:
+        """True between :meth:`press` and :meth:`release`."""
+        return self._press_active
 
     # ------------------------------------------------------------------ #
     # Timer tick
@@ -237,10 +311,15 @@ class AvatarStateMachine:
         self._press_active = False
         if self._state == DRAGGING:
             self._set_state(IDLE)
-        elif not moved:
-            self._set_state(CLICK)
-        else:  # pragma: no cover - defensive; drag_started always precedes
+        elif moved:
             self._set_state(IDLE)
+        elif self._state == DOUBLE_CLICK:
+            # The first release of a double-click already played ``click``;
+            # the double-click reaction replaced it and must survive the
+            # second release instead of being downgraded back to a click.
+            pass
+        else:
+            self._set_state(CLICK)
 
     def pointer_direction(self, direction: str) -> None:
         """The mouse cursor sits near the avatar in ``direction``.
@@ -262,10 +341,80 @@ class AvatarStateMachine:
         )
 
     # ------------------------------------------------------------------ #
+    # Stage 2: reactions
+    # ------------------------------------------------------------------ #
+    def hover_enter(self) -> bool:
+        """The pointer entered the avatar window -> a brief "oh!" reaction.
+
+        Deliberately timid: it only fires from :data:`IDLE`, and never while
+        a press/drag is in flight, so hovering can neither swallow nor
+        interrupt a click. Repeats without an intervening
+        :meth:`hover_leave` are ignored.
+
+        :returns: ``True`` when the hover reaction started.
+        """
+        if self._hovering:
+            return False
+        self._hovering = True
+        if self._press_active or self._state != IDLE:
+            return False
+        return self.play_reaction(HOVER)
+
+    def hover_leave(self) -> bool:
+        """The pointer left the avatar window.
+
+        Ends a running ``hover`` reaction immediately (back to a natural
+        ``idle``); any other animation is left alone.
+
+        :returns: ``True`` when a hover reaction was cut short.
+        """
+        self._hovering = False
+        if self._state == HOVER:
+            self._set_state(IDLE)
+            return True
+        return False
+
+    def double_click(self) -> bool:
+        """The user double-clicked: a bigger, more excited reaction.
+
+        Replays from the first frame when double-clicked again in quick
+        succession. Ignored while the avatar is being dragged.
+
+        :returns: ``True`` when the reaction started.
+        """
+        if self._state == DRAGGING:
+            return False
+        return self.play_reaction(DOUBLE_CLICK)
+
+    def confused(self) -> bool:
+        """A quick "huh?" head-shake.
+
+        Used when the user picks a menu entry that is not implemented yet.
+
+        :returns: ``True`` when the reaction started.
+        """
+        if self._state == DRAGGING:
+            return False
+        return self.play_reaction(CONFUSED)
+
+    def play_reaction(self, state: str) -> bool:
+        """Play the one-shot reaction ``state`` from its first frame.
+
+        Reactions are optional artwork: an unknown state, or one this
+        manifest cannot supply, is ignored instead of raising.
+
+        :returns: ``True`` when the reaction started.
+        """
+        if state not in self._reaction_states:
+            return False
+        self._set_state(state, restart=True)
+        return True
+
+    # ------------------------------------------------------------------ #
     # Internal
     # ------------------------------------------------------------------ #
-    def _set_state(self, state: str) -> None:
-        if state == self._state:
+    def _set_state(self, state: str, *, restart: bool = False) -> None:
+        if state == self._state and not restart:
             return
         self._state = state
         self._frame_index = 0

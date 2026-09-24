@@ -14,7 +14,10 @@
     "look_up": "look_up",
     "look_down": "look_down",
     "click": "click",
-    "dragging": "dragging"
+    "dragging": "dragging",
+    "hover": "hover",
+    "double_click": "double_click",
+    "confused": "confused"
   },
   "animations": {
     "idle": {
@@ -74,6 +77,34 @@
         {"eyes": "layers/eyes_look_up.svg", "dy": 2, "duration_ms": 260},
         {"eyes": "layers/eyes_look_up.svg", "dy": 5, "duration_ms": 260},
         {"eyes": "layers/eyes_look_up.svg", "dy": 2, "duration_ms": 260}
+      ]
+    },
+    "hover": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_half.svg", "dy": -3, "duration_ms": 90},
+        {"eyes": "layers/eyes_open.svg", "dy": -4, "duration_ms": 150},
+        {"eyes": "layers/eyes_half.svg", "dy": -1, "duration_ms": 70},
+        {"eyes": "layers/eyes_open.svg", "dy": 0,  "duration_ms": 110}
+      ]
+    },
+    "double_click": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_happy.svg", "dy": 5,   "duration_ms": 70},
+        {"eyes": "layers/eyes_happy.svg", "dy": -14, "duration_ms": 130},
+        {"eyes": "layers/eyes_wink.svg",  "dy": -7,  "duration_ms": 110},
+        {"eyes": "layers/eyes_happy.svg", "dy": -12, "duration_ms": 130},
+        {"eyes": "layers/eyes_open.svg",  "dy": 0,   "duration_ms": 120}
+      ]
+    },
+    "confused": {
+      "loop": false,
+      "frames": [
+        {"eyes": "layers/eyes_half.svg", "dx": -3, "duration_ms": 110},
+        {"eyes": "layers/eyes_half.svg", "dx": 3,  "duration_ms": 110},
+        {"eyes": "layers/eyes_half.svg", "dx": -3, "duration_ms": 110},
+        {"eyes": "layers/eyes_open.svg", "dx": 0,  "duration_ms": 130}
       ]
     }
   }

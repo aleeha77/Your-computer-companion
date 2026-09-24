@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "peeko"
 version = "0.1.0"
-description = "Peeko — a cute, animated desktop robot companion living on your desktop (Stage 0: project foundation)."
+description = "Peeko — a cute, animated desktop robot companion living on your desktop (Stage 2: basic interaction)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
