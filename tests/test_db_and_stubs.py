@@ -28,15 +28,29 @@ def test_database_requires_connect(tmp_path):
         db.initialize()
 
 
-def test_unimplemented_subsystems_raise_honestly():
-    """Future-stage interfaces must fail loudly, never fake success."""
+def test_the_ai_chat_client_is_no_longer_a_stub():
+    """Stage 3 replaced the AI stub with a real, validated client.
 
+    No request is made here: the point is that the client reports its own
+    configuration honestly instead of pretending (see
+    :mod:`tests.test_ai_client_provider` for the whole chat path).
+    """
     from peeko.ai.client import AIClient
 
-    client = AIClient(provider="openai", model="gpt-4o-mini",
-                      api_key="sk-test")
-    with pytest.raises(NotImplementedError, match="Stage 3"):
-        client.chat([{"role": "user", "content": "hi"}])
+    configured = AIClient(provider="openai", model="gpt-4o-mini",
+                          api_key="sk-test")
+    assert configured.is_configured() is True
+    assert configured.configuration_problem() == ""
+
+    unconfigured = AIClient(provider="openai", model="gpt-4o-mini")
+    assert unconfigured.is_configured() is False
+    assert unconfigured.configuration_problem() == (
+        "AI not configured — set PEEKO_AI_API_KEY in .env"
+    )
+
+
+def test_unimplemented_subsystems_raise_honestly():
+    """Future-stage interfaces must fail loudly, never fake success."""
 
     from peeko.voice.input import SpeechRecognizer
     from peeko.voice.output import SpeechSynthesizer

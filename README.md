@@ -6,7 +6,7 @@ maintainable, portable **Python desktop application** (PySide6/Qt) — modular,
 privacy-first, no cloud infrastructure. You configure optional AI/voice API
 keys yourself via a local `.env` file and run it on your own machine.
 
-> **Current development stage: Stage 2 of 13 (basic interaction —
+> **Current development stage: Stage 3 of 13 (AI chat —
 > completed).**
 > See [Current development stage](#current-development-stage) below.
 
@@ -24,11 +24,29 @@ keys yourself via a local `.env` file and run it on your own machine.
   over it, a bigger winkier bounce on double-click, and a quick "huh?"
   head-shake when you pick something from the menu that is not built yet.
   Hovering never steals a click and never interrupts a drag.
+- ✅ **AI chat** (Stage 3): right-click → **Talk** opens a real chat window
+  (its own window — the robot keeps floating). Type a message, press Enter,
+  watch a "Peeko is thinking…" state while the answer is on its way, and see
+  Peeko's reply in the transcript. Peeko answers with a defined, cute/warm/
+  playful personality, and the emotion + animation in each reply drive the
+  robot's *existing* animations (unknown names fall back to idle).
+  Conversation requests run off the UI thread, so the robot never freezes.
+- ✅ **Honest about AI configuration** (Stage 3): with no API key the chat
+  window shows a banner — *"AI not configured — set `PEEKO_AI_API_KEY` in
+  `.env`"* — and sending a message says the same thing instead of inventing
+  an answer. Network errors, timeouts and unreadable replies are reported in
+  plain words; nothing is ever faked.
+- ✅ **Safe AI output** (Stage 3): the AI returns one JSON object
+  (`response`, `emotion`, `animation`, `action`). Emotion, animation and
+  action are validated against **hard-coded allowed lists**, and the only
+  legal action is `null`, so nothing an AI reply says can run a command or
+  touch your computer. The only things a reply can change are the text in the
+  chat window and which existing animation the robot plays.
 - ✅ **Right-click interaction menu** (Stage 2): *Talk*, *Feed*, *Pet*,
   *Play*, *Sleep*, *Wake Up*, *Check Status…*, *Settings…* and *Quit* — all
   in their final places. Entries whose feature arrives in a later stage are
   labelled `— Stage N (not implemented)` right in the menu and answer with a
-  plain explanation instead of a fake window. **Check Status** and
+  plain explanation instead of a fake window. **Talk**, **Check Status** and
   **Settings** work today (see below).
 - ✅ **Check Status** (Stage 2): a live readout — version and stage, the
   current animation/state and available reactions, how many animations the
@@ -120,9 +138,11 @@ cp .env.example .env   # optional — Peeko works with defaults alone
 | `PEEKO_DATA_DIR`        | 0     | Override user data directory (defaults: OS convention)    | platformdirs    |
 | `PEEKO_CONFIG_DIR`      | 0     | Override user config directory                            | platformdirs    |
 | `PEEKO_LOG_DIR`         | 0     | Override log directory (default `<data_dir>/logs`)        | platformdirs    |
-| `PEEKO_AI_PROVIDER`     | 3     | AI provider (config only until Stage 3)                   | `openai`        |
-| `PEEKO_AI_MODEL`        | 3     | AI model name (config only until Stage 3)                 | *(empty)*       |
-| `PEEKO_AI_API_KEY`      | 3     | **Secret** — AI API key (never logged; Stage 3)           | *(empty)*       |
+| `PEEKO_AI_PROVIDER`     | 3     | AI provider: `openai` or `openai-compatible`               | `openai`        |
+| `PEEKO_AI_MODEL`        | 3     | Chat model name, e.g. `gpt-4o-mini` (needed to chat)       | *(empty)*       |
+| `PEEKO_AI_API_KEY`      | 3     | **Secret** — your AI API key (needed to chat; never logged) | *(empty)*       |
+| `PEEKO_AI_BASE_URL`     | 3     | API root; any OpenAI-compatible endpoint (or a local model) | `https://api.openai.com/v1` |
+| `PEEKO_AI_TIMEOUT_S`    | 3     | How long to wait for an answer, in seconds                 | `30`            |
 | `PEEKO_VOICE_INPUT_ENGINE` | 4  | Voice input engine (Stage 4)                              | *(empty)*       |
 | `PEEKO_TTS_ENGINE`      | 5     | Text-to-speech engine (Stage 5)                           | *(empty)*       |
 | `PEEKO_TTS_VOICE`       | 5     | TTS voice identifier (Stage 5)                            | *(empty)*       |
@@ -161,7 +181,7 @@ you drag it anywhere on the desktop.
 ```
 Peeko v0.1.0 — Stage 2 of 13          (info header, not clickable)
 ────────────────────────────────
-Talk — Stage 3 (not implemented)
+Talk
 Feed — Stage 7 (not implemented)
 Pet — Stage 6 (not implemented)
 Play — Stage 6 (not implemented)
@@ -266,9 +286,18 @@ peeko/
    ├── state_machine.py  timer-driven animation + reaction states (Qt-free)
    ├── assets.py      SVG layer files -> ready-to-draw pixmaps
    ├── renderer.py    compositing one frame (ground shadow + layers)
+   ├── expressions.py AI animation name -> an existing avatar animation
    ├── widget.py      the frameless/translucent/always-on-top window + input
    └── assets/        the artwork: manifest.json + layers/*.svg
-├── ai/                conversational AI — Stage 3, interface only
+├── ai/                conversational AI (Stage 3)
+   ├── client.py     AIClient: persona + context in, validated reply out
+   ├── personality.py the persona (data) + the JSON contract for the model
+   ├── context.py    the structured context block (the seam for Stages 6/7/8)
+   ├── providers.py  engine-agnostic seam + OpenAI-compatible provider
+   ├── schema.py     validates model output against the allowed lists
+   ├── vocabulary.py the allowed emotions / animations / actions
+   ├── errors.py     honest, key-free AI error messages
+   └── worker.py     Qt bridge: runs requests off the UI thread
 ├── voice/             voice input (Stage 4) + TTS (Stage 5), interface only
 ├── emotions/          PAD emotional-state model (real data model at Stage 0)
 ├── needs/             virtual-pet needs model + decay logic (real at Stage 0)
@@ -277,10 +306,11 @@ peeko/
 ├── db/                SQLite connection + schema versioning (real at Stage 0)
 └── ui/                Stage 2 interaction layer
    ├── context_menu.py  the menu described as data (MENU_SPEC) + Qt builder
+   ├── chat_window.py   the Stage 3 chat window (Talk)
    └── dialogs.py       Check Status readout, read-only Settings, "not yet"
 ```
 
-**How they relate at Stage 2:**
+**How they relate at Stage 3:**
 
 - `__main__` → `app` → `settings` + `paths` + `logging_setup` + `errors`
   → `avatar` (window) + `ui` (menu and dialogs).
@@ -301,13 +331,54 @@ peeko/
   without rework.
 - `emotions` and `needs` ship as real, unit-tested data models that later
   stages animate and simulate.
-- `ai`, `voice`, `memory`, `awareness` ship as **honest interfaces**: their
+- Inside `ai` (Stage 3): `client.py` builds the prompt from `personality.py`
+  plus the structured context from `context.py`, sends it through the
+  `providers.py` seam (one real OpenAI-compatible provider, stdlib HTTP), and
+  validates the model's JSON with `schema.py` + `vocabulary.py`. `worker.py`
+  runs that blocking call on a `QThreadPool` worker so the UI never waits, and
+  `ui/chat_window.py` shows the transcript. `avatar/expressions.py` is the
+  only place that knows both worlds: it maps the reply's animation name onto
+  an animation the current artwork manifest can really play.
+- The AI package deliberately never imports `peeko.avatar` or `peeko.ui`
+  (a test enforces this), and no AI module can run a command — model output
+  is data, never instructions.
+- `voice`, `memory`, `awareness` still ship as **honest interfaces**: their
   methods raise `NotImplementedError` naming the target stage — no fake
   buttons, no pretend features.
 
 ## Current development stage
 
-**Stage 2 of 13 — basic interaction (completed).** Stage 0 delivered the
+**Stage 3 of 13 — AI chat (completed).** The robot can now hold a typed
+conversation in its own window, while it keeps floating on your desktop:
+
+1. **Talk** in the right-click menu opens the chat window (`ui/chat_window.py`):
+   your messages and Peeko's replies in one transcript, a Send button, Enter
+   to send, Esc to close, and a "Peeko is thinking…" line while an answer is
+   on its way;
+2. **structured context in** — every message carries Peeko's situation
+   (emotion, happiness, energy, hunger, sleepiness, friendship, current app,
+   recent interactions, memory) as one JSON block. Real data where a real
+   subsystem exists (the interaction log records clicks, drags and chat turns
+   today); documented placeholders everywhere else, so Stages 6 (emotions),
+   7 (needs), 8 (memory) and 9 (app awareness) only have to pass their live
+   values in;
+3. **structured, validated output** — `{"response", "emotion", "animation",
+   "action"}`. Emotion and animation must come from hard-coded allowed lists
+   and `action` must be `null`; anything else falls back to the documented
+   default and is reported. A reply can therefore only change the text in the
+   chat window and which existing animation the robot plays;
+4. **personality** — a defined, versioned persona (cute, warm, playful,
+   curious, short-winded, honest about what it cannot do) that is prepended to
+   every conversation;
+5. **engine-agnostic providers** — one real OpenAI-compatible
+   chat-completions provider (stdlib HTTP, base URL + model from `.env`), so
+   OpenAI, a gateway, a local server or an aggregator all work by
+   configuration;
+6. **never blocking, never faking** — requests run on a worker thread; a
+   missing key, a timeout, a network failure or an unreadable reply produces
+   an honest message in the transcript, not a pretend answer.
+
+Stage 2 — basic interaction (completed). Stage 0 delivered the
 project foundation (modular package, settings, logging, errors, SQLite,
 tests, smoke test). Stage 1 turned the placeholder window into a real little
 character: a frameless translucent always-on-top robot, drawn from a
@@ -346,23 +417,34 @@ begins.
 - The character only knows its Stage 1–2 behaviours (idle, blink, glance,
   click, double-click, hover, drag, "huh?"). It cannot chat, feel or need
   anything yet — those are Stages 3–7.
-- **The six pet actions in the menu (Talk, Feed, Pet, Play, Sleep,
-  Wake Up) do not do anything yet.** They are deliberately visible and
-  labelled `— Stage N (not implemented)`, and picking one opens an
-  explanation rather than pretending. The settings for AI/voice/TTS exist
-  but have no effect until Stages 3–5.
+- **The remaining pet actions (Feed, Pet, Play, Sleep, Wake Up) do not do
+  anything yet.** They are deliberately visible and labelled `— Stage N (not
+  implemented)`, and picking one opens an explanation rather than pretending.
+  The voice/TTS settings exist but have no effect until Stages 4–5.
+- **A real conversation needs your own API key.** Peeko has no cloud
+  backend: set `PEEKO_AI_API_KEY` (and `PEEKO_AI_MODEL`) in `.env` to chat.
+  Without a key the chat window says so and no request is ever attempted.
+  The automated tests use a mock provider and a fake HTTP transport — they
+  never need a key and never touch the network, so a green test run proves
+  the plumbing, not a live conversation.
 - **Settings is read-only.** You can see the configuration Peeko runs with,
   but editing it from the UI is not implemented yet — use `.env` or
   environment variables.
-- **AI chat, voice input, TTS, persistent memory and app awareness are not
+- **Voice input, TTS, persistent memory and app awareness are not
   implemented yet** — their config variables exist but have no effect, and
-  their interfaces raise `NotImplementedError` on purpose.
+  their interfaces raise `NotImplementedError` on purpose. Peeko's chat does
+  not remember anything between runs until the memory stage lands, and its
+  mood/needs in the AI context are still documented placeholders until
+  Stages 6–7.
+- **Peeko cannot control your computer.** It can chat and play an expression;
+  that is all. The chat window says so, and the `action` field of every
+  AI reply is forced to `null`.
 - No tray icon and no installer yet (packaging is Stage 12).
 - On headless machines you must set `QT_QPA_PLATFORM=offscreen`; on Linux
   desktops, standard Qt system libraries are required.
-- Peeko has no cloud backend: AI/voice features (later stages) will work
-  only with your own API keys, and the app never sends data anywhere at
-  Stage 2.
+- Peeko has no cloud backend: AI/voice features work only with your own API
+  keys. At Stage 3 the only network request the app can make is your chat
+  message to the provider you configured.
 
 ## License
 

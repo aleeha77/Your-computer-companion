@@ -10,10 +10,11 @@ Settings are read from, in increasing priority order:
 The result is a plain ``Settings`` dataclass the rest of the app consumes.
 
 .. note::
-   Several fields describe features that arrive in later stages
-   (AI chat, voice input, TTS). They are read from the environment today
-   so the configuration surface is stable, but they have **no effect**
-   until those stages land. They are never logged.
+   Fields for features that arrive in later stages (voice input, TTS) are
+   read from the environment today so the configuration surface is stable,
+   but they have **no effect** until those stages land. The ``ai_*`` fields
+   are live as of Stage 3: they configure the chat window. Secret values are
+   never logged (see :func:`secret_env_var_names`).
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ ENV_AVATAR_ASSETS_DIR = "PEEKO_AVATAR_ASSETS_DIR"
 ENV_AI_PROVIDER = "PEEKO_AI_PROVIDER"
 ENV_AI_MODEL = "PEEKO_AI_MODEL"
 ENV_AI_API_KEY = "PEEKO_AI_API_KEY"
+ENV_AI_BASE_URL = "PEEKO_AI_BASE_URL"
+ENV_AI_TIMEOUT_S = "PEEKO_AI_TIMEOUT_S"
 ENV_VOICE_INPUT_ENGINE = "PEEKO_VOICE_INPUT_ENGINE"
 ENV_TTS_ENGINE = "PEEKO_TTS_ENGINE"
 ENV_TTS_VOICE = "PEEKO_TTS_VOICE"
@@ -63,6 +66,19 @@ def _as_optional_path(value: str) -> Path | None:
     """An empty/absent setting means "use the built-in default"."""
     value = value.strip()
     return Path(value).expanduser() if value else None
+
+
+def _as_float(value: str, default: float) -> float:
+    """Parse a float setting, falling back to a sane default on a typo.
+
+    A non-numeric value must not stop Peeko from starting; the fallback is
+    logged by the caller (see :func:`load_settings`).
+    """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 @dataclass(frozen=True)
@@ -93,10 +109,18 @@ class Settings:
     #: the installed package.
     avatar_assets_dir: Path | None = None
 
-    # -- Stage 3: AI chat (not implemented yet; config only) ---------------
+    # -- Stage 3: AI chat --------------------------------------------------
+    #: Provider the chat window talks to (``openai`` or
+    #: ``openai-compatible`` — see :mod:`peeko.ai.providers`).
     ai_provider: str = "openai"
+    #: Chat model name, e.g. ``gpt-4o-mini``.
     ai_model: str = ""
     ai_api_key: str = ""  # SECRET — never log it
+    #: API root; empty means the provider's documented default (any
+    #: OpenAI-compatible endpoint can be pointed at instead).
+    ai_base_url: str = ""
+    #: How long to wait for an answer before giving up, in seconds.
+    ai_timeout_s: float = 30.0
 
     # -- Stage 4: voice input (not implemented yet; config only) -----------
     voice_input_engine: str = ""
@@ -130,6 +154,8 @@ class Settings:
             ),
             "ai_provider": self.ai_provider,
             "ai_model": self.ai_model,
+            "ai_base_url": self.ai_base_url or "(provider default)",
+            "ai_timeout_s": self.ai_timeout_s,
             # ai_api_key intentionally omitted
             "voice_input_engine": self.voice_input_engine,
             "tts_engine": self.tts_engine,
@@ -175,6 +201,8 @@ def load_settings(env: Mapping[str, str] | None = None,
         ai_provider=env.get(ENV_AI_PROVIDER, "openai"),
         ai_model=env.get(ENV_AI_MODEL, ""),
         ai_api_key=env.get(ENV_AI_API_KEY, ""),
+        ai_base_url=env.get(ENV_AI_BASE_URL, ""),
+        ai_timeout_s=_as_float(env.get(ENV_AI_TIMEOUT_S, ""), 30.0),
         voice_input_engine=env.get(ENV_VOICE_INPUT_ENGINE, ""),
         tts_engine=env.get(ENV_TTS_ENGINE, ""),
         tts_voice=env.get(ENV_TTS_VOICE, ""),

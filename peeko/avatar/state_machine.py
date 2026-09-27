@@ -411,6 +411,40 @@ class AvatarStateMachine:
         return True
 
     # ------------------------------------------------------------------ #
+    # Stage 3: expressions requested by something other than the user
+    # ------------------------------------------------------------------ #
+    def can_play(self, state: str) -> bool:
+        """Can this artwork manifest play ``state``?
+
+        Core states are always present (a manifest missing one fails at
+        startup); reaction states are optional and simply switched off when
+        the artwork does not provide them.
+        """
+        return state in self._state_map
+
+    def play_cued(self, state: str) -> bool:
+        """Play ``state`` because something *else* asked for it.
+
+        Used from Stage 3 on: an AI reply carries an animation name, the
+        avatar layer maps it to a state, and this method plays it. One-shot
+        animations settle back to :data:`IDLE` when they finish, exactly
+        like a reaction.
+
+        User input always wins: the cue is declined while the user is
+        holding or dragging the avatar, and while it is being carried.
+        Unknown/unsupported states are declined too, so a bad name can
+        never put the avatar into a state it cannot render.
+
+        :returns: ``True`` when the state started playing.
+        """
+        if state not in self._state_map:
+            return False
+        if self._press_active or state == DRAGGING or self._state == DRAGGING:
+            return False
+        self._set_state(state, restart=True)
+        return True
+
+    # ------------------------------------------------------------------ #
     # Internal
     # ------------------------------------------------------------------ #
     def _set_state(self, state: str, *, restart: bool = False) -> None:

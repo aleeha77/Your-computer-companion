@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,8 @@ PEEKO_ENV_VARS = [
     "PEEKO_AI_PROVIDER",
     "PEEKO_AI_MODEL",
     "PEEKO_AI_API_KEY",
+    "PEEKO_AI_BASE_URL",
+    "PEEKO_AI_TIMEOUT_S",
     "PEEKO_VOICE_INPUT_ENGINE",
     "PEEKO_TTS_ENGINE",
     "PEEKO_TTS_VOICE",
@@ -252,3 +255,162 @@ def manifest_data() -> dict:
 def avatar_assets(tmp_path, manifest_data) -> Path:
     """Path of a throw-away, valid ``manifest.json`` (plus its SVG files)."""
     return write_avatar_assets(tmp_path / "assets", manifest_data)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 3: AI chat fakes — the suite never touches the network or needs a key
+# --------------------------------------------------------------------------- #
+def completion_body(text: str, **extra) -> str:
+    """An OpenAI-compatible chat-completions body carrying ``text``."""
+    payload: dict = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": text},
+             "finish_reason": "stop"}
+        ],
+    }
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+class FakeTransport:
+    """A recording stand-in for the HTTP transport.
+
+    Records every request so a test can assert what Peeko would really have
+    sent, and answers with a canned body (or raises a canned error). Nothing
+    here opens a socket.
+    """
+
+    def __init__(self, body: str = "", *, error: BaseException | None = None,
+                 delay_s: float = 0.0) -> None:
+        self.body = body
+        self.error = error
+        self.delay_s = delay_s
+        self.calls: list[dict] = []
+
+    def __call__(self, url, headers, payload, timeout):
+        self.calls.append({
+            "url": url,
+            "headers": dict(headers),
+            "payload": payload,
+            "timeout": timeout,
+        })
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        if self.error is not None:
+            raise self.error
+        return self.body
+
+    # -- convenient views of the last request ---------------------------- #
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    @property
+    def last_call(self) -> dict:
+        return self.calls[-1]
+
+    @property
+    def messages(self) -> list[dict]:
+        """The messages of the last request (``[]`` if nothing was sent)."""
+        if not self.calls:
+            return []
+        return list(self.calls[-1]["payload"].get("messages", []))
+
+    @property
+    def system_prompt(self) -> str:
+        for message in self.messages:
+            if message.get("role") == "system":
+                return message.get("content", "")
+        return ""
+
+
+#: A key that must never appear in a log line, an error message or a repr.
+TEST_API_KEY = "sk-test-not-a-real-key"
+
+#: A base URL nobody can reach: any real request would fail loudly.
+TEST_BASE_URL = "https://peeko-test.invalid/v1"
+
+
+def ai_client(transport: FakeTransport, *, key: str = TEST_API_KEY,
+              model: str = "test-model", provider: str = "openai-compatible"):
+    """A real :class:`peeko.ai.client.AIClient` wired to a fake transport."""
+    from peeko.ai.client import AIClient
+
+    return AIClient(
+        provider=provider, model=model, api_key=key,
+        base_url=TEST_BASE_URL, transport=transport,
+    )
+
+
+def ai_settings(tmp_path, *, key: str = TEST_API_KEY, model: str = "test-model",
+                **overrides):
+    """Real settings pointed at a throw-away directory and a test AI config."""
+    from peeko.settings import Settings
+
+    values = dict(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        log_dir=tmp_path / "logs",
+        ai_provider="openai-compatible",
+        ai_model=model,
+        ai_api_key=key,
+        ai_base_url=TEST_BASE_URL,
+    )
+    values.update(overrides)
+    return Settings(**values)
+
+
+def synchronous_submit(*, raise_unexpected: bool = False):
+    """A drop-in for ``peeko.ai.worker.submit_reply`` that runs inline.
+
+    Qt delivers the worker's signals straight to the window when both live on
+    the same thread, so a UI test can assert the outcome immediately instead
+    of waiting for a thread pool. It exercises the whole real path
+    (prompt -> provider -> validator) apart from the threading itself, which
+    :mod:`tests.test_ai_worker` covers separately.
+    """
+    from peeko.ai.errors import AIError
+
+    started: list[bool] = []
+
+    def submit(client, message, *, context=None, history=(), signals=None,
+               options=None, pool=None):
+        started.append(True)
+        try:
+            reply = client.respond(message, context=context, history=history)
+        except AIError as exc:
+            signals.failed.emit(exc.message)
+        except Exception as exc:  # noqa: BLE001 - mirrors the worker contract
+            if raise_unexpected:
+                raise
+            signals.failed.emit(f"unexpected: {exc}")
+        else:
+            signals.finished.emit(reply)
+        return "inline-task"
+
+    submit.started = started  # type: ignore[attr-defined]
+    return submit
+
+
+def wait_for(predicate, timeout_s: float = 5.0) -> bool:
+    """Process Qt events until ``predicate()`` is true (or time runs out).
+
+    Used by the offscreen UI tests that deliberately use the real thread
+    pool: the reply is delivered through the event loop, exactly as it is in
+    the running app.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if app is not None:
+            app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    if app is not None:
+        app.processEvents()
+    return bool(predicate())
