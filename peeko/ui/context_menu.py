@@ -1,11 +1,15 @@
 """UI helpers for Peeko: the avatar's right-click interaction menu.
 
-Stage 2 reorganises the right-click menu into the full **interaction menu**
+Stage 2 reorganised the right-click menu into the full **interaction menu**
 the owner specified: the pet actions (Talk / Feed / Pet / Play / Sleep /
-Wake Up) appear in their final places even though they arrive in later
+Wake Up) appear in their final places even though the rest arrive in later
 stages — labelled honestly as *not implemented*, and answering with an
-explanation of when they land. Two entries work today (**Check Status**,
-**Settings**), and **Quit** stays exactly as it was.
+explanation of when they land.
+
+Stage 3 turns the first of them on: **Talk** now opens the real chat window
+(see :mod:`peeko.ui.chat_window`). **Check Status**, **Settings** and
+**Quit** work as before, and the remaining pet actions stay labelled as
+future work.
 
 Everything is described by :data:`MENU_SPEC` — a single, inspectable data
 structure the Qt builder consumes, so "what the menu shows" can be tested
@@ -25,6 +29,7 @@ from peeko import __stage__, __total_stages__, __version__
 # --------------------------------------------------------------------------- #
 # Action ids (the value carried in ``QAction.setData``)
 # --------------------------------------------------------------------------- #
+TALK_ID = "talk"
 STATUS_ID = "check_status"
 SETTINGS_ID = "settings"
 QUIT_ID = "quit"
@@ -73,9 +78,11 @@ class MenuEntry:
 #:
 #: Stage 2 keeps every planned pet action visible so the roadmap is legible
 #: from the app itself, marks the future ones in their own label, and groups
-#: them above a separator so "what works" is obvious at a glance.
+#: them above a separator so "what works" is obvious at a glance. Stage 3
+#: drops the "(not implemented)" label from *Talk*, which now works.
 MENU_SPEC: tuple[Optional[MenuEntry], ...] = (
-    MenuEntry("talk", "Talk", 3, "conversational AI chat with personality"),
+    MenuEntry(TALK_ID, "Talk", None,
+              "chat with Peeko in its own window (needs your own AI key)"),
     MenuEntry("feed", "Feed", 7, "hunger, from the virtual-pet needs system"),
     MenuEntry("pet", "Pet", 6, "petting reactions from the emotions system"),
     MenuEntry("play", "Play", 6, "play reactions from the emotions system"),
@@ -95,7 +102,7 @@ MENU_ENTRIES: tuple[MenuEntry, ...] = tuple(
     entry for entry in MENU_SPEC if entry is not None
 )
 
-_CONTROL_IDS = (STATUS_ID, SETTINGS_ID, QUIT_ID)
+_CONTROL_IDS = (TALK_ID, STATUS_ID, SETTINGS_ID, QUIT_ID)
 
 
 def entries() -> tuple[MenuEntry, ...]:
@@ -179,6 +186,7 @@ __all__ = [
     "QUIT_ID",
     "SETTINGS_ID",
     "STATUS_ID",
+    "TALK_ID",
     "MenuEntry",
     "action_ids",
     "build_avatar_context_menu",

@@ -697,7 +697,11 @@ def test_check_status_menu_entry_shows_a_live_readout(qapp, settings):
         box = boxes[0]
         assert box.windowTitle() == "Peeko — Status"
         assert f"State now: {window._machine.state}" in box.informativeText()
-        assert "Stage 2 of 13" in box.informativeText()
+        # The readout always names the stage the build is actually at.
+        from peeko import __stage__, __total_stages__
+
+        assert (f"Stage {__stage__} of {__total_stages__}"
+                in box.informativeText())
         assert box.isModal() is False          # never blocks the animation
         assert window._tick_timer.isActive()
         # ...and the animation really does keep ticking while it is open.

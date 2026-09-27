@@ -10,8 +10,9 @@ Responsible for:
 - honouring ``PEEKO_SMOKE_TEST=1`` (auto-quit ~2 s after startup with
   exit code 0, so headless CI can verify the full app boots).
 
-Nothing here blocks the UI thread: there is no network or audio I/O at
-Stage 0.
+Nothing here blocks the UI thread: the avatar animates on QTimer callbacks,
+and the Stage 3 chat window runs every AI request on a worker thread
+(see :mod:`peeko.ai.worker`).
 """
 
 from __future__ import annotations

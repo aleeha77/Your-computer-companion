@@ -22,10 +22,23 @@ Stage 2 adds the interaction layer:
   implemented and answer with an explanation plus a "huh?" reaction;
 * right-click menu / Ctrl+Q / window close quit, exactly as before.
 
-Everything animation-related runs on ``QTimer`` callbacks — no sleeps, no
-blocking calls. Dialogs are opened asynchronously (``open()``/``show()``),
-so nothing ever blocks the animation loop. AI/voice/needs input arrives in
-later stages as new states on the same machine.
+Stage 3 connects the conversation system — while staying a desktop robot:
+
+* the menu's **Talk** entry opens :class:`peeko.ui.chat_window.ChatWindow`,
+  a separate top-level window; the robot itself stays frameless, transparent
+  and always on top;
+* the chat window asks this window for the structured context
+  (:func:`peeko.ai.context.build_context`) and hands back the animation the
+  AI reply asked for, which is played through
+  :func:`peeko.avatar.expressions.apply_expression` — an unknown or
+  unplayable name quietly falls back to idle;
+* a small :class:`peeko.ai.context.InteractionLog` records what the user and
+  Peeko just did (clicks, drags, chat turns), so the context Peeko sends is
+  real data rather than invented values.
+
+The chat window owns all AI/network work and runs it off the UI thread; this
+window never waits on it. Everything animation-related still runs on
+``QTimer`` callbacks — no sleeps, no blocking calls.
 """
 
 from __future__ import annotations
@@ -43,14 +56,18 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from peeko.ai.context import InteractionLog, build_context
 from peeko.avatar.assets import AssetLibrary
+from peeko.avatar.expressions import apply_expression
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.renderer import draw_frame
 from peeko.avatar.state_machine import IDLE, AvatarStateMachine
+from peeko.ui.chat_window import ChatWindow
 from peeko.ui.context_menu import (
     QUIT_ID,
     SETTINGS_ID,
     STATUS_ID,
+    TALK_ID,
     build_avatar_context_menu,
     find_entry,
 )
@@ -98,6 +115,10 @@ class AvatarWindow(QWidget):
         self._last_frame_key: tuple | None = None
         self._dialogs: list = []
         self._settings_dialog = None
+        self._chat_window: ChatWindow | None = None
+        #: Real, bounded record of what the user and Peeko just did — sent to
+        #: the AI as part of the structured context (Stage 3).
+        self._interactions = InteractionLog()
 
         # ---- asset pipeline: manifest -> pixmaps -> machine ---------------- #
         # ``PEEKO_AVATAR_ASSETS_DIR`` lets the owner point Peeko at their own
@@ -239,6 +260,7 @@ class AvatarWindow(QWidget):
         self._arm_press(event.globalPosition().toPoint())
         if self._machine.double_click():
             LOG.debug("Double-click reaction triggered.")
+        self._interactions.record("user double-clicked the robot")
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -257,6 +279,10 @@ class AvatarWindow(QWidget):
         if event.button() == Qt.LeftButton and self._press_active:
             self._press_active = False
             self._machine.release(moved=self._drag_active)
+            self._interactions.record(
+                "user dragged the robot around"
+                if self._drag_active else "user clicked the robot"
+            )
             self._drag_offset = None
             self._press_global = None
             self._drag_active = False
@@ -282,6 +308,8 @@ class AvatarWindow(QWidget):
         entry = find_entry(action_id)
         if action_id == QUIT_ID:
             self.quitRequested.emit()
+        elif action_id == TALK_ID:
+            self._show_chat()
         elif action_id == STATUS_ID:
             self._show_status()
         elif action_id == SETTINGS_ID:
@@ -300,6 +328,57 @@ class AvatarWindow(QWidget):
                 manifest=self._manifest,
             )
         )
+
+    def _show_chat(self) -> None:
+        """Talk: open (or re-focus) the Stage 3 chat window.
+
+        The chat is a separate top-level window on purpose — the robot stays
+        a floating desktop character, and the conversation gets a normal
+        window with a title bar. The same window is reused, so the
+        conversation is not lost by accident.
+        """
+        if self._chat_window is None:
+            self._chat_window = ChatWindow(
+                self._settings,
+                context_provider=self.build_ai_context,
+                interactions=self._interactions,
+                parent=self,
+            )
+            self._chat_window.expressionRequested.connect(self.play_expression)
+            LOG.info("Chat window created.")
+        self._interactions.record("user opened the chat window")
+        self._chat_window.show()
+        self._chat_window.raise_()
+        self._chat_window.activateWindow()
+
+    # ------------------------------------------------------------------ #
+    # The Stage 3 seam: context out, expressions in
+    # ------------------------------------------------------------------ #
+    def build_ai_context(self):
+        """Structured context for the next chat message.
+
+        Today only the interaction log carries real data; emotions, needs,
+        memory and app awareness are documented placeholders until Stages
+        6/7/8, which will pass their live state in here instead. Nothing in
+        this method touches the network or blocks.
+        """
+        return build_context(interactions=self._interactions)
+
+    def play_expression(self, animation: str) -> str | None:
+        """Play the animation the AI reply asked for.
+
+        The name is mapped onto one of the animations the *current* artwork
+        manifest really has (see :mod:`peeko.avatar.expressions`); an unknown
+        name, or one this manifest cannot play, quietly falls back to idle.
+        User input wins: while the robot is being dragged or held nothing is
+        interrupted.
+
+        :returns: the avatar state played, or ``None`` when the cue was
+            declined.
+        """
+        played = apply_expression(self._machine, animation)
+        LOG.info("AI expression %r -> avatar state %r", animation, played)
+        return played
 
     def _show_settings(self) -> None:
         """Settings: the (read-only) configuration Peeko is running with."""

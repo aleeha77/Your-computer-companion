@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from peeko import __app_name__, __stage__, __total_stages__, __version__
+from peeko.ai.client import AIClient
+from peeko.ai.providers import DEFAULT_BASE_URL
 from peeko.ui.context_menu import MenuEntry, future_entries
 
 #: Section rules are plain text so the readout renders identically everywhere.
@@ -84,11 +86,16 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         if getattr(settings, "avatar_assets_dir", None)
         else "packaged artwork inside the Peeko package"
     )
+    # The AI line reports the real configuration (never the key itself), so
+    # "why does the chat not answer?" is answerable from inside the app.
+    client = AIClient.from_settings(settings)
     works_today = [
         "idle bob, blinking, glances around, glances toward the cursor",
         "hover reaction, click squash-and-bounce, double-click bounce",
         "drag wiggle while you carry it",
-        "right-click menu: Check Status, Settings, Quit (Ctrl+Q)",
+        "right-click menu: Talk, Check Status, Settings, Quit (Ctrl+Q)",
+        "chat window (Talk): typed conversation with the AI, and the reply "
+        "drives the robot's expression",
     ]
     future = [
         f"{entry.label} (Stage {entry.stage})"
@@ -106,6 +113,12 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         *_avatar_lines(machine, manifest),
         f"Artwork loaded from: {artworks}",
         "",
+        "AI CHAT (Stage 3)",
+        _RULE,
+        f"  Configured: {'yes' if client.is_configured() else 'no'}"
+        f"  ({client.configuration_problem() or 'ready to chat'})",
+        f"  {client.describe()}",
+        "",
         "WORKS TODAY",
         _RULE,
         *[f"  - {item}" for item in works_today],
@@ -114,8 +127,8 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         _RULE,
         *future_lines,
         "",
-        "AI chat, voice input, TTS, memory and app awareness are not",
-        "implemented yet either — their settings exist but do nothing.",
+        "Voice input, TTS, memory and app awareness are not implemented yet",
+        "either — their settings exist but do nothing.",
     ]
     return "\n".join(lines)
 
@@ -154,15 +167,21 @@ _SETTINGS_ROWS = (
     ("Log directory", "log_dir", "path"),
     ("Database file", "db_path", "path"),
     ("Artwork folder", "avatar_assets_dir", "artwork"),
+    # Stage 3: what the chat window will actually use. The key itself is
+    # never rendered — only whether one is set.
+    ("AI provider", "ai_provider", "text"),
+    ("AI model", "ai_model", "text"),
+    ("AI base URL", "ai_base_url", "base_url"),
+    ("AI API key", None, "api_key"),
 )
 
 #: What the settings viewer says about editing (honest about the stage).
 SETTINGS_NOTE = (
     "Read-only for now: these are the values Peeko is actually running with. "
     "Changing settings from the UI is not implemented yet — set them with "
-    "environment variables or a .env file (see the README). "
-    "AI, voice and TTS settings can be configured there too, but they have no "
-    "effect until Stages 3-5."
+    "environment variables or a .env file (see the README). The AI settings "
+    "are used by the chat window (Talk); the voice and TTS settings still "
+    "have no effect until Stages 4-5."
 )
 
 
@@ -170,7 +189,8 @@ def settings_rows(settings) -> list[tuple[str, str]]:
     """The (label, value) pairs the settings viewer displays.
 
     Paths that are not set show what Peeko falls back to, never a blank or
-    a made-up value.
+    a made-up value. The API key is reported as set/unset only — its value
+    is never put into a widget, a log line or a report.
     """
     rows: list[tuple[str, str]] = []
     for label, attribute, kind in _SETTINGS_ROWS:
@@ -184,6 +204,11 @@ def settings_rows(settings) -> list[tuple[str, str]]:
                 str(configured) if configured
                 else "packaged artwork inside the Peeko package"
             )
+        elif kind == "base_url":
+            value = str(getattr(settings, attribute, "")) or DEFAULT_BASE_URL
+        elif kind == "api_key":
+            key = str(getattr(settings, "ai_api_key", "") or "")
+            value = "<set — never shown>" if key else "(not set)"
         else:
             value = str(getattr(settings, attribute, "")) or "(not set)"
         rows.append((label, value))
@@ -260,8 +285,8 @@ def build_not_implemented_text(entry: MenuEntry) -> str:
         f"{__app_name__} is at Stage {__stage__} of {__total_stages__}, so this "
         "action does nothing yet — it is deliberately not faked.",
         "",
-        "Working right now: Check Status, Settings, Quit — and clicking, "
-        "double-clicking, hovering and dragging the robot itself.",
+        "Working right now: Talk (chat), Check Status, Settings, Quit — and "
+        "clicking, double-clicking, hovering and dragging the robot itself.",
     ]
     return "\n".join(lines)
 

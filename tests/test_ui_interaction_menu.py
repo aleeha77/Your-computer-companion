@@ -1,4 +1,8 @@
-"""The Stage 2 interaction menu and its dialogs (offscreen Qt).
+"""The interaction menu and its dialogs (offscreen Qt).
+
+Stage 3 turned the menu's *Talk* entry on: it now opens the real chat window
+(see :mod:`tests.test_ui_chat_window`), so this file covers the entries that
+are still planned — and that the two are clearly distinguished.
 
 Two things are checked here:
 
@@ -34,6 +38,7 @@ from peeko.ui.context_menu import (
     QUIT_ID,
     SETTINGS_ID,
     STATUS_ID,
+    TALK_ID,
     MenuEntry,
     build_avatar_context_menu,
     entries,
@@ -60,7 +65,6 @@ PACKAGED_MANIFEST = DEFAULT_ASSETS_DIR / "manifest.json"
 #: The pet actions the owner listed for the menu, with the stage that
 #: implements each. Order matters: it is the documented menu order.
 EXPECTED_FUTURE_ENTRIES = (
-    ("talk", "Talk", 3),
     ("feed", "Feed", 7),
     ("pet", "Pet", 6),
     ("play", "Play", 6),
@@ -108,7 +112,9 @@ def test_menu_planned_entries_are_labelled_as_not_implemented():
 
 def test_menu_has_the_working_entries_the_owner_asked_for():
     working = {e.id: e for e in entries() if e.implemented}
-    assert set(working) == {STATUS_ID, SETTINGS_ID, QUIT_ID}
+    # Talk joined the working entries in Stage 3 (it opens the chat window).
+    assert set(working) == {TALK_ID, STATUS_ID, SETTINGS_ID, QUIT_ID}
+    assert working[TALK_ID].display_label == "Talk"
     assert working[STATUS_ID].display_label == "Check Status…"
     assert working[SETTINGS_ID].display_label == "Settings…"
     assert working[QUIT_ID].display_label == "Quit"
@@ -132,10 +138,14 @@ def test_find_entry_resolves_ids_and_rejects_junk():
 
 
 def test_planned_entry_descriptions_name_their_stage():
-    talk = find_entry("talk")
-    assert "not implemented" in talk.description.lower()
-    assert f"Stage {talk.stage} of {__total_stages__}" in talk.description
-    assert "AI chat" in talk.description
+    feed = find_entry("feed")
+    assert "not implemented" in feed.description.lower()
+    assert f"Stage {feed.stage} of {__total_stages__}" in feed.description
+
+    # Talk is implemented as of Stage 3, so it makes no such claim.
+    talk = find_entry(TALK_ID)
+    assert talk.implemented is True
+    assert "not implemented" not in talk.description.lower()
 
 
 def test_working_entry_descriptions_make_no_false_promises():
@@ -213,7 +223,9 @@ def test_status_text_lists_what_works_and_what_does_not(settings, machine):
     assert "WORKS TODAY" in text
     assert "NOT IMPLEMENTED YET" in text
     assert "Quit" in text
-    assert "AI chat" in text and "not" in text.lower()
+    # The status readout is honest about both the new chat and the rest.
+    assert "AI CHAT (Stage 3)" in text
+    assert "Talk" in text and "not" in text.lower()
 
 
 def test_status_text_degrades_honestly_without_a_machine(settings):
@@ -368,11 +380,11 @@ def test_not_implemented_text_is_honest_about_every_planned_entry(entry):
 
 
 def test_not_implemented_dialog_matches_the_entry(qapp):
-    entry = find_entry("talk")
+    entry = find_entry("feed")
     box = build_not_implemented_dialog(None, entry)
     try:
-        assert box.windowTitle() == "Peeko — Talk"
-        assert "Talk" in box.text()
+        assert box.windowTitle() == "Peeko — Feed"
+        assert "Feed" in box.text()
         assert box.informativeText() == build_not_implemented_text(entry)
     finally:
         box.deleteLater()
