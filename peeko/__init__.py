@@ -1,5 +1,15 @@
 """Peeko — a cute, animated desktop robot companion.
 
+Stage 4: voice input. Peeko can now *hear* you: the chat window's **Mic**
+button records through the microphone, sends the audio to an
+OpenAI-compatible speech-to-text endpoint, and puts the recognised words in
+the message box (nothing is sent until you press Send, so a misheard word can
+be fixed first). The whole feature lives in :mod:`peeko.voice` — microphone
+capture, the provider seam with one real engine, honest error messages and
+the Qt worker that keeps all of it off the UI thread. Listening is voice
+input only: Peeko still cannot speak (Stage 5), it cannot control your
+computer, and it never writes your audio to disk.
+
 Stage 3: AI chat. The robot can now hold a typed conversation in its own
 window (right-click → **Talk**), while it keeps floating on the desktop.
 The conversation system lives in :mod:`peeko.ai` and is deliberately
@@ -35,5 +45,5 @@ functionality.
 
 __app_name__ = "Peeko"
 __version__ = "0.1.0"
-__stage__ = 3
+__stage__ = 4
 __total_stages__ = 13

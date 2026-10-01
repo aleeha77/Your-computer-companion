@@ -39,6 +39,26 @@ Stage 3 connects the conversation system — while staying a desktop robot:
 The chat window owns all AI/network work and runs it off the UI thread; this
 window never waits on it. Everything animation-related still runs on
 ``QTimer`` callbacks — no sleeps, no blocking calls.
+
+Stage 4 adds the robot's first **listening** behaviour, without giving this
+window a microphone:
+
+* the chat window owns the capture
+  (:mod:`peeko.voice`) and tells this window when a recording starts and
+  stops through
+  :attr:`peeko.ui.chat_window.ChatWindow.listeningChanged`, which is
+  connected to :meth:`AvatarWindow.play_listening`;
+* :meth:`AvatarWindow.play_listening` plays (or ends) the sustained
+  ``listening`` animation through
+  :func:`peeko.avatar.expressions.apply_listening` — the same artwork-driven
+  seam everything else uses;
+* that animation is optional artwork: a manifest without it simply means the
+  robot shows no listening pose, while the chat window keeps its own
+  "listening…" indicator, so a missing animation is never a lie;
+* nothing in this module opens an audio device, so the avatar still starts
+  and animates on a machine with no microphone and no audio library — and
+  user input still wins: the listening pose is declined while the robot is
+  being dragged.
 """
 
 from __future__ import annotations
@@ -58,7 +78,7 @@ from PySide6.QtWidgets import QWidget
 
 from peeko.ai.context import InteractionLog, build_context
 from peeko.avatar.assets import AssetLibrary
-from peeko.avatar.expressions import apply_expression
+from peeko.avatar.expressions import apply_expression, apply_listening
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.renderer import draw_frame
 from peeko.avatar.state_machine import IDLE, AvatarStateMachine
@@ -345,6 +365,9 @@ class AvatarWindow(QWidget):
                 parent=self,
             )
             self._chat_window.expressionRequested.connect(self.play_expression)
+            # Stage 4: the chat window owns the microphone; the robot only
+            # shows what it is doing ("listening…").
+            self._chat_window.listeningChanged.connect(self.play_listening)
             LOG.info("Chat window created.")
         self._interactions.record("user opened the chat window")
         self._chat_window.show()
@@ -378,6 +401,23 @@ class AvatarWindow(QWidget):
         """
         played = apply_expression(self._machine, animation)
         LOG.info("AI expression %r -> avatar state %r", animation, played)
+        return played
+
+    def play_listening(self, listening: bool) -> str | None:
+        """Show or end the listening animation while a voice capture runs.
+
+        Stage 4: the chat window starts/stops the microphone and tells this
+        window through :attr:`peeko.ui.chat_window.ChatWindow.listeningChanged`.
+        The animation comes from the *same* artwork manifest as everything
+        else (:mod:`peeko.avatar.expressions`), and is optional: artwork
+        without a ``listening`` animation simply shows nothing, while the chat
+        window keeps its own "listening…" indicator.
+
+        :returns: the avatar state played, or ``None`` when nothing changed.
+        """
+        played = apply_listening(self._machine, bool(listening))
+        LOG.info("Voice %s -> avatar state %r",
+                 "listening" if listening else "stopped listening", played)
         return played
 
     def _show_settings(self) -> None:

@@ -17,16 +17,20 @@ from peeko.avatar.expressions import (
     ANIMATION_STATE_MAP,
     FALLBACK_STATE,
     apply_expression,
+    apply_listening,
     expression_state,
     known_animations,
+    listening_available,
 )
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.state_machine import (
     CLICK,
     CONFUSED,
     DOUBLE_CLICK,
+    DRAGGING,
     HOVER,
     IDLE,
+    LISTENING,
     AvatarStateMachine,
 )
 from peeko.avatar.widget import DEFAULT_ASSETS_DIR
@@ -134,3 +138,47 @@ def test_user_input_wins_while_the_mouse_button_is_held():
     machine = packaged_machine()
     machine.press()
     assert apply_expression(machine, "happy_bounce") is None
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: the sustained listening state (voice input)
+# --------------------------------------------------------------------------- #
+def test_apply_listening_shows_and_ends_the_pose():
+    machine = machine_for(PACKAGED_MANIFEST)
+
+    assert apply_listening(machine, True) == LISTENING
+    assert machine.state == LISTENING
+    assert apply_listening(machine, False) == IDLE
+    assert machine.state == IDLE
+    assert apply_listening(machine, False) is None   # nothing left to end
+
+
+def test_the_packaged_artwork_ships_the_listening_animation():
+    machine = machine_for(PACKAGED_MANIFEST)
+    assert listening_available(machine) is True
+    assert machine.can_play(LISTENING) is True
+
+
+def test_a_manifest_without_the_animation_declines_and_says_nothing(
+    tmp_path, manifest_data
+):
+    """Older artwork keeps working: no pose, and the window still says so."""
+    manifest_data["animations"].pop("listening", None)
+    machine = machine_for(write_avatar_assets(tmp_path / "art", manifest_data))
+
+    assert listening_available(machine) is False
+    assert apply_listening(machine, True) is None
+    assert apply_listening(machine, False) is None
+    assert machine.state == IDLE
+
+
+def test_the_listening_pose_yields_to_a_drag():
+    """Expressions never fight the user: dragging always wins."""
+    machine = machine_for(PACKAGED_MANIFEST)
+    assert apply_listening(machine, True) == LISTENING
+
+    machine.press()
+    machine.drag_started()
+    assert apply_listening(machine, True) is None     # declined while dragging
+    assert machine.state == DRAGGING
+    assert apply_listening(machine, False) is None    # no pose to end

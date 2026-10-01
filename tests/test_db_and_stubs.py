@@ -49,14 +49,49 @@ def test_the_ai_chat_client_is_no_longer_a_stub():
     )
 
 
+def test_the_voice_recognizer_is_no_longer_a_stub():
+    """Stage 4 replaced the voice-input stub with a real recognizer.
+
+    No microphone and no request happen here: the point is that it reports its
+    own configuration honestly instead of pretending (see
+    :mod:`tests.test_voice_input` for the whole capture path, and
+    :mod:`tests.test_voice_worker` for the off-thread bridge).
+    """
+    from peeko.voice.errors import VoiceConfigError, VoiceUnavailableError
+    from peeko.voice.input import SpeechRecognizer
+    from peeko.voice.providers import MockTranscriptionProvider
+
+    unconfigured = SpeechRecognizer()          # no key, no provider
+    assert unconfigured.configuration_problem() != ""
+    assert "PEEKO_AI_API_KEY" in unconfigured.configuration_problem()
+    with pytest.raises(VoiceConfigError):
+        unconfigured.transcribe(b"audio")
+    with pytest.raises(VoiceConfigError):
+        unconfigured.listen()
+
+    # A configured recognizer really transcribes — the mock provider is a
+    # test double, so this stays offline and needs no microphone.
+    from peeko.voice.audio import AudioClip
+
+    configured = SpeechRecognizer(provider=MockTranscriptionProvider("hello"))
+    assert configured.transcribe(AudioClip(b"\x00\x10" * 800)) == "hello"
+
+    # …and a machine with no microphone is reported, not faked.
+    from peeko.voice.audio import UnavailableAudioSource
+
+    deaf = SpeechRecognizer(
+        source=UnavailableAudioSource(),
+        provider=MockTranscriptionProvider("hello"),
+    )
+    with pytest.raises(VoiceUnavailableError):
+        deaf.listen()
+
+
 def test_unimplemented_subsystems_raise_honestly():
     """Future-stage interfaces must fail loudly, never fake success."""
 
-    from peeko.voice.input import SpeechRecognizer
     from peeko.voice.output import SpeechSynthesizer
 
-    with pytest.raises(NotImplementedError, match="Stage 4"):
-        SpeechRecognizer().transcribe(b"audio")
     with pytest.raises(NotImplementedError, match="Stage 5"):
         SpeechSynthesizer().speak("hello")
 

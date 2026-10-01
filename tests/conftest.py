@@ -37,7 +37,12 @@ PEEKO_ENV_VARS = [
     "PEEKO_AI_API_KEY",
     "PEEKO_AI_BASE_URL",
     "PEEKO_AI_TIMEOUT_S",
+    "PEEKO_VOICE_ENABLED",
     "PEEKO_VOICE_INPUT_ENGINE",
+    "PEEKO_STT_MODEL",
+    "PEEKO_STT_BASE_URL",
+    "PEEKO_VOICE_TIMEOUT_S",
+    "PEEKO_VOICE_MAX_SECONDS",
     "PEEKO_TTS_ENGINE",
     "PEEKO_TTS_VOICE",
 ]
@@ -241,6 +246,14 @@ def minimal_manifest() -> dict:
                     {"eyes": "layers/eyes_half.svg", "dx": 2, "duration_ms": 100},
                 ],
             },
+            # -- Stage 4 sustained state ----------------------------------- #
+            "listening": {
+                "loop": True,
+                "frames": [
+                    {"eyes": "layers/eyes_up.svg", "dy": -2, "duration_ms": 100},
+                    {"eyes": "layers/eyes_open.svg", "duration_ms": 100},
+                ],
+            },
         },
     }
 
@@ -414,3 +427,321 @@ def wait_for(predicate, timeout_s: float = 5.0) -> bool:
     if app is not None:
         app.processEvents()
     return bool(predicate())
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: voice-input fakes — no microphone, no socket, no sounddevice
+# --------------------------------------------------------------------------- #
+#: Samples per second the fakes produce (Peeko's real capture rate).
+FAKE_SAMPLE_RATE = 16_000
+
+
+def pcm_samples(frames: int = 1_600, *, amplitude: int = 0) -> bytes:
+    """``frames`` frames of 16-bit mono PCM at ``amplitude``.
+
+    ``amplitude=0`` is digital silence; anything above ~100 raises
+    :meth:`peeko.voice.audio.AudioClip.rms_level` above zero, which is how
+    the level-callback tests tell "quiet" from "talking".
+    """
+    sample = int(amplitude).to_bytes(2, "little", signed=True)
+    return sample * int(frames)
+
+
+class FakeAudioSource:
+    """A scripted microphone: hands out queued chunks and records the calls.
+
+    It satisfies :class:`peeko.voice.audio.AudioSource`, so the *whole* real
+    capture path (``open`` → ``read`` → ``close``, cancellation, level
+    callbacks, duration capping) runs exactly as it does through
+    ``sounddevice`` — on a machine with no microphone at all.
+    """
+
+    name = "fake"
+
+    def __init__(self, chunks=None, *,
+                 sample_rate: int = FAKE_SAMPLE_RATE,
+                 channels: int = 1,
+                 reason: str = "",
+                 open_error: BaseException | None = None,
+                 read_error: BaseException | None = None,
+                 on_read=None) -> None:
+        self.chunks = (
+            [pcm_samples(1_600, amplitude=1_200)]
+            if chunks is None else list(chunks)
+        )
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
+        #: Non-empty makes this source unavailable — exactly as an honest
+        #: source reports why it cannot capture.
+        self.reason = reason
+        self.open_error = open_error
+        self.read_error = read_error
+        #: Optional ``callable(read_number)`` — used to cancel mid-capture.
+        self.on_read = on_read
+        self.opened = False
+        self.open_calls = 0
+        self.closed = 0
+        self.reads = 0
+
+    def availability(self) -> str:
+        return self.reason
+
+    def open(self) -> None:
+        self.open_calls += 1
+        if self.open_error is not None:
+            raise self.open_error
+        self.opened = True
+
+    def read(self) -> bytes:
+        self.reads += 1
+        if self.on_read is not None:
+            self.on_read(self.reads)
+        if self.read_error is not None:
+            raise self.read_error
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def close(self) -> None:
+        self.opened = False
+        self.closed += 1
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"FakeAudioSource(chunks={len(self.chunks)}, "
+            f"reads={self.reads}, closed={self.closed})"
+        )
+
+
+class _FakeArray:
+    """The smallest thing ``sounddevice`` returns that Peeko can use.
+
+    The real library hands back a numpy array; Peeko only ever calls
+    ``tobytes()`` on it, so that (plus the buffer protocol through
+    ``bytes()``) is all this stand-in implements.
+    """
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def tobytes(self) -> bytes:
+        return self._payload
+
+    def __bytes__(self) -> bytes:
+        return self._payload
+
+
+class FakeInputStream:
+    """A stand-in for ``sounddevice.InputStream`` (records its lifecycle)."""
+
+    def __init__(self, *, chunks=None, **kwargs) -> None:
+        self.kwargs = dict(kwargs)
+        self.chunks = [pcm_samples(1_024, amplitude=1_200)] if chunks is None \
+            else list(chunks)
+        self.started = False
+        self.stopped = 0
+        self.closed = 0
+        self.overflowed = False
+        self.start_error: BaseException | None = None
+        self.read_error: BaseException | None = None
+
+    def start(self) -> None:
+        if self.start_error is not None:
+            raise self.start_error
+        self.started = True
+
+    def read(self, _frames: int):
+        """Return ``(array, overflowed)`` — the shape sounddevice uses."""
+        if self.read_error is not None:
+            raise self.read_error
+        payload = self.chunks.pop(0) if self.chunks else b""
+        return _FakeArray(payload), self.overflowed
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class FakeSoundDeviceModule:
+    """A minimal stand-in for the optional ``sounddevice`` library.
+
+    Injected into :class:`peeko.voice.audio.SoundDeviceAudioSource` so the
+    real source's logic (device check, lazy import, error classification,
+    stream lifecycle) is tested without PortAudio and without the library
+    being installed — it deliberately is **not** a dependency of this
+    project's test environment.
+    """
+
+    def __init__(self, *, chunks=None, query_error: BaseException | None = None,
+                 open_error: BaseException | None = None,
+                 start_error: BaseException | None = None,
+                 read_error: BaseException | None = None) -> None:
+        self.chunks = chunks
+        self.query_error = query_error
+        self.open_error = open_error
+        self.start_error = start_error
+        self.read_error = read_error
+        self.device_queries: list[dict] = []
+        self.instances: list[FakeInputStream] = []
+
+    def query_devices(self, **kwargs):
+        self.device_queries.append(dict(kwargs))
+        if self.query_error is not None:
+            raise self.query_error
+        return [{"name": "Fake microphone", "max_input_channels": 1}]
+
+    def InputStream(self, **kwargs) -> FakeInputStream:  # noqa: N802 - library API
+        if self.open_error is not None:
+            raise self.open_error
+        stream = FakeInputStream(chunks=self.chunks, **kwargs)
+        stream.start_error = self.start_error
+        stream.read_error = self.read_error
+        self.instances.append(stream)
+        return stream
+
+
+class FakeSTTTransport:
+    """A recording stand-in for the transcription HTTP transport.
+
+    Nothing here opens a socket: it records the request Peeko would really
+    have sent and answers with a canned body (or raises a canned error).
+    """
+
+    def __init__(self, body: str = "", *, error: BaseException | None = None,
+                 delay_s: float = 0.0) -> None:
+        self.body = body
+        self.error = error
+        self.delay_s = float(delay_s)
+        self.calls: list[dict] = []
+
+    def __call__(self, url, headers, body, timeout):
+        self.calls.append({
+            "url": url,
+            "headers": dict(headers),
+            "body": body,
+            "timeout": timeout,
+        })
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        if self.error is not None:
+            raise self.error
+        return self.body
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    @property
+    def last_call(self) -> dict:
+        return self.calls[-1]
+
+    @property
+    def sent_body(self) -> bytes:
+        """The multipart body of the last request (``b""`` if none)."""
+        return self.calls[-1]["body"] if self.calls else b""
+
+    @property
+    def sent_audio(self) -> bool:
+        """Whether the upload really carried a WAV payload."""
+        return b"RIFF" in self.sent_body
+
+
+def transcription_body(text: str, **extra) -> str:
+    """An OpenAI-compatible transcription body carrying ``text``."""
+    payload: dict = {"text": text}
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+def voice_settings(tmp_path, *, key: str = TEST_API_KEY, engine: str = "",
+                   model: str = "", base_url: str = "", enabled: bool = True,
+                   timeout_s: float | None = None,
+                   max_seconds: float | None = None, **overrides):
+    """Real settings pointed at a throw-away directory and a test voice config.
+
+    ``key`` is deliberately the *same* ``PEEKO_AI_API_KEY`` the chat uses,
+    because that is the design: one key configures both features (see
+    :meth:`peeko.voice.input.SpeechRecognizer.from_settings`).
+    """
+    from peeko.settings import Settings
+
+    values = dict(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        log_dir=tmp_path / "logs",
+        ai_provider="openai-compatible",
+        ai_model="test-model",
+        ai_api_key=key,
+        ai_base_url=TEST_BASE_URL,
+        voice_enabled=enabled,
+        voice_input_engine=engine,
+        voice_stt_model=model,
+        voice_stt_base_url=base_url,
+    )
+    if timeout_s is not None:
+        values["voice_timeout_s"] = timeout_s
+    if max_seconds is not None:
+        values["voice_max_seconds"] = max_seconds
+    values.update(overrides)
+    return Settings(**values)
+
+
+def voice_recognizer(*, chunks=None, text: str = "hello there",
+                     provider=None, source=None, **kwargs):
+    """A real :class:`peeko.voice.input.SpeechRecognizer`, fully faked.
+
+    A :class:`FakeAudioSource` stands in for the microphone and a
+    :class:`peeko.voice.providers.MockTranscriptionProvider` for the service,
+    so the complete capture → transcribe path runs with no hardware, no
+    network and no API key.
+    """
+    from peeko.voice.input import SpeechRecognizer
+    from peeko.voice.providers import MockTranscriptionProvider
+
+    source = FakeAudioSource(chunks) if source is None else source
+    provider = (MockTranscriptionProvider(text) if provider is None
+                else provider)
+    return SpeechRecognizer(source=source, provider=provider, **kwargs)
+
+
+def synchronous_submit_capture(*, raise_unexpected: bool = False):
+    """A drop-in for ``peeko.voice.worker.submit_capture`` that runs inline.
+
+    The capture itself runs on the caller's thread (so there is no thread pool
+    and no real microphone in a UI test), but the worker's signals are
+    delivered through the Qt event loop on a zero-delay timer — the same
+    *ordering* the real worker's queued signal delivery produces, where the
+    window has already entered its listening state before a result arrives.
+
+    Tests therefore assert the outcome after ``wait_for(...)``/
+    ``app.processEvents()``.
+    """
+    from PySide6.QtCore import QTimer
+
+    from peeko.voice.errors import VoiceError
+
+    started: list[bool] = []
+
+    def submit(recognizer, *, signals=None, max_duration_s=None, pool=None):
+        started.append(True)
+
+        def deliver() -> None:
+            try:
+                text = recognizer.listen()
+            except VoiceError as exc:
+                signals.failed.emit(exc.message)
+            except Exception as exc:  # noqa: BLE001 - mirrors the worker
+                if raise_unexpected:
+                    raise
+                signals.failed.emit(f"unexpected: {exc}")
+            else:
+                if text:
+                    signals.transcribed.emit(text)
+                else:
+                    signals.empty.emit()
+
+        QTimer.singleShot(0, deliver)
+        return "inline-task"
+
+    submit.started = started  # type: ignore[attr-defined]
+    return submit

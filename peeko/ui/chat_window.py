@@ -16,10 +16,27 @@ What this window is responsible for:
   the reply is re-emitted as :attr:`ChatWindow.expressionRequested`, which
   the avatar window turns into one of its existing animations.
 
-The window owns no AI logic of its own: prompts, validation and the
-controlled vocabulary all live in :mod:`peeko.ai`. Here we only talk to
-:class:`peeko.ai.client.AIClient`, which is why the whole chat path can be
-tested with a fake provider and no network.
+Stage 4 adds **voice input** to the same window:
+
+* a **Mic** button that starts and stops a capture (click to talk, click
+  again to stop). The microphone, the HTTP round trip and the waiting all run
+  off the UI thread (see :mod:`peeko.voice.worker`);
+* a visible **"listening…"** state, plus a
+  :attr:`ChatWindow.listeningChanged` signal the avatar turns into its
+  listening animation;
+* transcribed words land in the message box — nothing is sent to Peeko until
+  the user presses Send, so they can fix a misheard word first;
+* every voice failure (microphone missing, permission refused, capture error,
+  service error, timeout, no key, or voice input switched off in settings) is
+  reported in plain words, and a cancelled or empty capture says nothing at
+  all — never an invented transcript.
+
+The window owns no AI or voice logic of its own: prompts, validation and the
+controlled vocabulary live in :mod:`peeko.ai`; capture, transcription and
+their failure modes live in :mod:`peeko.voice`. Here we only talk to
+:class:`peeko.ai.client.AIClient` and
+:class:`peeko.voice.input.SpeechRecognizer`, which is why the whole chat path
+can be tested with a fake provider and a fake microphone and no network.
 
 Nothing in this module executes anything an AI reply says. An answer can
 change exactly two things: the text shown here and which allowed animation
@@ -51,11 +68,39 @@ from peeko.ai.context import ChatContext, InteractionLog
 from peeko.ai.schema import AIResponse
 from peeko.ai.worker import AIWorkerSignals, submit_reply
 from peeko.ui.context_menu import TALK_ID
+from peeko.voice.errors import VoiceError
+from peeko.voice.input import SpeechRecognizer
+from peeko.voice.worker import VoiceWorkerSignals, submit_capture
 
 LOG = logging.getLogger("peeko.ui")
 
 #: Shown while a request is in flight (the user must never be left guessing).
 THINKING_TEXT = "Peeko is thinking…"
+
+#: Shown while the microphone is open.
+LISTENING_TEXT = "Listening… speak now, then click Stop (or press Mic again)."
+
+#: Button labels for the Mic control.
+MIC_LABEL = "Mic"
+MIC_STOP_LABEL = "Stop"
+
+#: Tooltips for the Mic control (honest about what a click will do).
+MIC_TOOLTIP = (
+    "Voice input: click to listen through your microphone. What Peeko hears "
+    "lands in the message box — nothing is sent until you press Send. "
+    "Click again to stop."
+)
+MIC_ENABLED_TOOLTIP = MIC_TOOLTIP
+MIC_DISABLED_TOOLTIP = (
+    "Voice input is switched off (PEEKO_VOICE_ENABLED=0). Click to see how "
+    "to turn the microphone back on."
+)
+
+#: Shown when the user clicks Mic while voice input is switched off.
+VOICE_DISABLED_TEXT = (
+    "Voice input is switched off. Set PEEKO_VOICE_ENABLED=1 in .env (next to "
+    "the app) and restart Peeko to use the microphone."
+)
 
 #: Shown when a request failed for a reason nobody could describe better.
 FAILED_TEXT = "Peeko could not answer just now."
@@ -120,6 +165,18 @@ def build_banner_text(client: AIClient) -> str:
     )
 
 
+def build_heard_text(text: str) -> str:
+    """The notice shown after a successful voice capture.
+
+    Deliberately explicit that the words are *not* sent yet: speech
+    recognition is not perfect, so the user gets to fix a word first.
+    """
+    return (
+        f'Heard: “{" ".join(text.split())}” — press Send (or Enter) to send '
+        f"it to Peeko, or edit it first."
+    )
+
+
 class ChatWindow(QWidget):
     """Peeko's chat window — one conversation, its own top-level window.
 
@@ -138,20 +195,33 @@ class ChatWindow(QWidget):
     :param submit: the function that runs one reply off the UI thread.
         Defaults to :func:`peeko.ai.worker.submit_reply`; tests inject a
         synchronous double so no thread (and no network) is involved.
+    :param recognizer: an :class:`peeko.voice.input.SpeechRecognizer` to use
+        for voice input. When omitted, one is built from ``settings`` every
+        time the microphone is opened, so editing ``.env`` and pressing Mic
+        again picks the new configuration up.
+    :param submit_voice: the function that runs one capture off the UI thread.
+        Defaults to :func:`peeko.voice.worker.submit_capture`; tests inject a
+        synchronous double so no thread (and no real microphone) is involved.
     :param parent: usually the avatar window, which owns this window.
 
     Signals:
         expressionRequested: an accepted animation name from an AI reply. The
             avatar window maps it onto one of its real animations and plays
             it; nothing here touches the state machine.
+        listeningChanged: ``True`` when a voice capture starts, ``False`` when
+            it ends (for any reason). The avatar window turns that into its
+            listening animation.
     """
 
     expressionRequested = Signal(str)
+    listeningChanged = Signal(bool)
 
     def __init__(self, settings, client: AIClient | None = None, *,
                  context_provider: Callable[[], ChatContext | None] | None = None,
                  interactions: InteractionLog | None = None,
                  submit: Callable[..., object] | None = None,
+                 recognizer: SpeechRecognizer | None = None,
+                 submit_voice: Callable[..., object] | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
@@ -160,17 +230,30 @@ class ChatWindow(QWidget):
         self._context_provider = context_provider
         self._interactions = interactions
         self._submit = submit or submit_reply
+        self._injected_recognizer = recognizer is not None
+        self._recognizer = recognizer
+        self._submit_voice = submit_voice or submit_capture
 
         self._entries: list[ChatEntry] = []
         self._history: list[dict[str, str]] = []
         self._tasks: list[object] = []
         self._thinking = False
+        self._notes = ""
+        self._listening = False
+        self._voice_task: object | None = None
+        self._voice_cancel_requested = False
 
         # One signal emitter for the whole window, owned by the UI thread:
         # the worker emits from its own thread and Qt delivers the slots here.
         self._signals = AIWorkerSignals()
         self._signals.finished.connect(self._on_reply)
         self._signals.failed.connect(self._on_failed)
+
+        self._voice_signals = VoiceWorkerSignals()
+        self._voice_signals.transcribed.connect(self._on_transcribed)
+        self._voice_signals.empty.connect(self._on_voice_empty)
+        self._voice_signals.cancelled.connect(self._on_voice_cancelled)
+        self._voice_signals.failed.connect(self._on_voice_failed)
 
         self._build_ui()
         self.refresh_configuration()
@@ -220,6 +303,12 @@ class ChatWindow(QWidget):
         self._input.returnPressed.connect(self._on_send_clicked)
         row.addWidget(self._input, 1)
 
+        self._mic_button = QPushButton(MIC_LABEL)
+        self._mic_button.setObjectName("chat_mic")
+        self._mic_button.setToolTip(MIC_TOOLTIP)
+        self._mic_button.clicked.connect(self._on_mic_clicked)
+        row.addWidget(self._mic_button)
+
         self._send_button = QPushButton("Send")
         self._send_button.setObjectName("chat_send")
         self._send_button.setToolTip("Send your message (or just press Enter).")
@@ -229,6 +318,8 @@ class ChatWindow(QWidget):
 
         self._hint = QLabel(
             f"Enter sends · Esc closes this window · the robot keeps floating. "
+            f"Mic listens through your microphone (Stage 4) and puts the words "
+            f"in the message box — nothing is sent until you press Send. "
             f"Stage {__stage__} of {__total_stages__} — Peeko cannot control "
             f"your computer; it can only chat and play an expression."
         )
@@ -260,14 +351,33 @@ class ChatWindow(QWidget):
         banner = build_banner_text(self._client)
         self._banner.setText(banner)
         self._banner.setVisible(bool(banner))
+        self._refresh_mic_button()
         LOG.info("Chat window configuration: %s", self._client.describe())
         return not banner
+
+    def _refresh_mic_button(self) -> None:
+        """Reflect the voice settings on the Mic button (never a dead button).
+
+        The button stays clickable in every state: a click either starts a
+        capture or explains, in the transcript, exactly why it cannot.
+        """
+        enabled = bool(getattr(self._settings, "voice_enabled", True))
+        self._mic_button.setToolTip(
+            MIC_ENABLED_TOOLTIP if enabled else MIC_DISABLED_TOOLTIP
+        )
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         """Refresh the configuration each time the window comes up."""
         super().showEvent(event)
         self.refresh_configuration()
         self._input.setFocus()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Never leave the microphone (or the robot's ears) open behind us."""
+        if self._listening:
+            LOG.info("Chat window closed while listening — stopping the mic.")
+            self.stop_listening()
+        super().closeEvent(event)
 
     @property
     def client(self) -> AIClient:
@@ -349,12 +459,168 @@ class ChatWindow(QWidget):
 
     def _set_thinking(self, thinking: bool) -> None:
         self._thinking = thinking
-        self._status.setText(THINKING_TEXT if thinking else "")
+        self._refresh_status()
         self._send_button.setEnabled(not thinking)
         self._send_button.setToolTip(
             "Peeko is thinking — one message at a time."
             if thinking else "Send your message (or just press Enter)."
         )
+
+    def _refresh_status(self) -> None:
+        """Show the one thing the user most needs to know right now.
+
+        Priority: a request in flight, then an open microphone, then any note
+        about the last reply. Keeping this in one place means the listening
+        indicator can never be wiped by a reply that arrives mid-capture.
+        """
+        if self._thinking:
+            text = THINKING_TEXT
+        elif self._listening:
+            text = LISTENING_TEXT
+        else:
+            text = self._notes
+        self._status.setText(text)
+
+    # ------------------------------------------------------------------ #
+    # Voice input (Stage 4): the microphone
+    # ------------------------------------------------------------------ #
+    def is_listening(self) -> bool:
+        """True while a capture is running."""
+        return self._listening
+
+    def mic_text(self) -> str:
+        """The Mic button's label (``"Mic"``, or ``"Stop"`` while listening)."""
+        return self._mic_button.text()
+
+    def voice_enabled(self) -> bool:
+        """Whether the settings allow the microphone to be used at all."""
+        return bool(getattr(self._settings, "voice_enabled", True))
+
+    def recognizer(self) -> SpeechRecognizer:
+        """The recognizer voice input will use.
+
+        An injected one is reused; otherwise a fresh one is built from the
+        current settings every time, so a ``.env`` edit is picked up by the
+        next click (exactly like the AI client).
+        """
+        if self._injected_recognizer and self._recognizer is not None:
+            return self._recognizer
+        self._recognizer = SpeechRecognizer.from_settings(self._settings)
+        return self._recognizer
+
+    def voice_problem(self) -> str:
+        """Why the microphone cannot be used right now (``""`` when it can)."""
+        if not self.voice_enabled():
+            return VOICE_DISABLED_TEXT
+        try:
+            return self.recognizer().availability_problem()
+        except Exception as exc:  # noqa: BLE001 - never a crash from a check
+            LOG.exception("Could not check the voice configuration")
+            return (
+                "Voice input unavailable: the microphone could not be checked "
+                f"({exc})."
+            )
+
+    def _on_mic_clicked(self) -> None:
+        """The Mic button: stop when listening, otherwise try to start."""
+        if self._listening:
+            self.stop_listening()
+        else:
+            self.start_listening()
+
+    def start_listening(self) -> bool:
+        """Open the microphone off the UI thread and show the listening state.
+
+        :returns: True when a capture was actually started. ``False`` means
+            nothing was opened — and the reason is always said out loud in the
+            transcript, never swallowed.
+        """
+        if self._listening:
+            return False
+        if not self.voice_enabled():
+            LOG.warning("Voice input is switched off (PEEKO_VOICE_ENABLED=0).")
+            self._append_notice(VOICE_DISABLED_TEXT, error=True)
+            return False
+
+        try:
+            recognizer = self.recognizer()
+        except VoiceError as exc:
+            LOG.warning("Voice input is misconfigured: %s", exc.message)
+            self._append_notice(exc.message, error=True)
+            return False
+        except Exception:  # noqa: BLE001 - never a crash from configuration
+            LOG.exception("Could not build the speech recognizer")
+            self._append_notice(FAILED_TEXT, error=True)
+            return False
+
+        # Checked *before* the microphone is touched: with no key (or no
+        # microphone) Peeko never opens an audio device at all.
+        problem = recognizer.availability_problem()
+        if problem:
+            LOG.warning("Voice input unavailable: %s", problem)
+            self._append_notice(problem, error=True)
+            return False
+
+        self._voice_cancel_requested = False
+        try:
+            task = self._submit_voice(
+                recognizer, signals=self._voice_signals,
+                max_duration_s=getattr(
+                    self._settings, "voice_max_seconds", None
+                ),
+            )
+        except Exception:  # noqa: BLE001 - a broken submit must not crash
+            LOG.exception("Could not start the voice capture")
+            self._append_notice(FAILED_TEXT, error=True)
+            return False
+
+        self._voice_task = task
+        self._record("user started voice input")
+        LOG.info("Voice capture started: %s", recognizer.describe())
+        self._set_listening(True)
+        return True
+
+    def stop_listening(self, *, cancelled: bool = True) -> bool:
+        """Stop a running capture; the words heard so far are dropped.
+
+        :param cancelled: True when the user asked to stop (the worker reports
+            a cancellation and nothing is shown); False for the internal
+            teardown when a result already arrived.
+        :returns: True when a capture was running.
+        """
+        if not self._listening:
+            return False
+        self._voice_cancel_requested = bool(cancelled)
+        task = self._voice_task
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - cancelling is best-effort
+                LOG.debug("Could not cancel the voice capture", exc_info=True)
+        self._record("user stopped voice input")
+        LOG.info("Voice capture stopped by the user.")
+        self._set_listening(False)
+        return True
+
+    def _set_listening(self, listening: bool) -> None:
+        """Enter/leave the listening state and tell the avatar about it."""
+        listening = bool(listening)
+        was = self._listening
+        self._listening = listening
+        if not listening:
+            self._voice_task = None
+        self._mic_button.setText(MIC_STOP_LABEL if listening else MIC_LABEL)
+        self._mic_button.setToolTip(
+            "Stop listening and keep what was heard."
+            if listening else (
+                MIC_ENABLED_TOOLTIP if self.voice_enabled()
+                else MIC_DISABLED_TOOLTIP
+            )
+        )
+        self._refresh_status()
+        if was != listening:
+            self.listeningChanged.emit(listening)
 
     # ------------------------------------------------------------------ #
     # Sending
@@ -456,7 +722,10 @@ class ChatWindow(QWidget):
         )
         if reply.notes:
             # Honest about any value the model sent outside the allowed lists.
-            self._status.setText("; ".join(reply.notes))
+            self._notes = "; ".join(reply.notes)
+        else:
+            self._notes = ""
+        self._refresh_status()
         self.expressionRequested.emit(reply.animation)
         LOG.info("Chat reply shown (emotion=%s animation=%s).",
                  reply.emotion, reply.animation)
@@ -467,6 +736,44 @@ class ChatWindow(QWidget):
         text = (message or "").strip() or FAILED_TEXT
         self._append_notice(text, error=True)
         LOG.info("Chat request failed: %s", text)
+
+    # ------------------------------------------------------------------ #
+    # Voice results (delivered on the UI thread by the worker's signals)
+    # ------------------------------------------------------------------ #
+    def _on_transcribed(self, text: str) -> None:
+        """Words arrived: put them in the message box, send nothing yet."""
+        self._set_listening(False)
+        if self._voice_cancel_requested:
+            # The user stopped the capture; a late result is not wanted.
+            LOG.debug("Dropping a transcript that arrived after a stop request.")
+            return
+        heard = (text or "").strip()
+        if not heard:
+            LOG.info("Voice input produced no words — nothing shown.")
+            return
+        self._input.setText(heard)
+        self._input.setFocus()
+        self._append_notice(build_heard_text(heard))
+        self._record(f"user spoke (transcribed {len(heard)} characters)")
+        LOG.info("Voice transcript placed in the input box (%d characters).",
+                 len(heard))
+
+    def _on_voice_empty(self) -> None:
+        """Nothing was heard — say nothing, invent nothing."""
+        self._set_listening(False)
+        LOG.info("Voice capture ended without any words — nothing shown.")
+
+    def _on_voice_cancelled(self) -> None:
+        """The user stopped the capture — nothing to report."""
+        self._set_listening(False)
+        LOG.info("Voice capture cancelled — nothing shown.")
+
+    def _on_voice_failed(self, message: str) -> None:
+        """A voice problem: report it in plain words, never invent a transcript."""
+        self._set_listening(False)
+        text = (message or "").strip() or FAILED_TEXT
+        self._append_notice(text, error=True)
+        LOG.warning("Voice input failed: %s", text)
 
     # ------------------------------------------------------------------ #
     # History (sent back to the AI with the next message)
@@ -486,11 +793,14 @@ def build_chat_window(settings, client: AIClient | None = None, *,
                       context_provider: Callable[[], ChatContext | None] | None = None,
                       interactions: InteractionLog | None = None,
                       submit: Callable[..., object] | None = None,
+                      recognizer: SpeechRecognizer | None = None,
+                      submit_voice: Callable[..., object] | None = None,
                       parent: QWidget | None = None) -> ChatWindow:
     """Build (but do not show) the chat window."""
     return ChatWindow(
         settings, client, context_provider=context_provider,
-        interactions=interactions, submit=submit, parent=parent,
+        interactions=interactions, submit=submit, recognizer=recognizer,
+        submit_voice=submit_voice, parent=parent,
     )
 
 
@@ -498,11 +808,14 @@ def show_chat_window(settings, client: AIClient | None = None, *,
                      context_provider: Callable[[], ChatContext | None] | None = None,
                      interactions: InteractionLog | None = None,
                      submit: Callable[..., object] | None = None,
+                     recognizer: SpeechRecognizer | None = None,
+                     submit_voice: Callable[..., object] | None = None,
                      parent: QWidget | None = None) -> ChatWindow:
     """Build, show and focus the chat window (non-blocking)."""
     window = build_chat_window(
         settings, client, context_provider=context_provider,
-        interactions=interactions, submit=submit, parent=parent,
+        interactions=interactions, submit=submit, recognizer=recognizer,
+        submit_voice=submit_voice, parent=parent,
     )
     window.show()
     window.raise_()
@@ -518,13 +831,20 @@ __all__ = [
     "ChatEntry",
     "ChatWindow",
     "FAILED_TEXT",
+    "LISTENING_TEXT",
     "MAX_TRANSCRIPT_ENTRIES",
+    "MIC_DISABLED_TOOLTIP",
+    "MIC_LABEL",
+    "MIC_STOP_LABEL",
+    "MIC_TOOLTIP",
     "ROLE_NOTICE",
     "ROLE_PEEKO",
     "ROLE_USER",
     "SPEAKER_LABELS",
     "THINKING_TEXT",
+    "VOICE_DISABLED_TEXT",
     "build_banner_text",
     "build_chat_window",
+    "build_heard_text",
     "show_chat_window",
 ]

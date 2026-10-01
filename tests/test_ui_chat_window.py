@@ -32,23 +32,37 @@ from peeko.ai.context import InteractionLog, build_context
 from peeko.avatar.widget import AvatarWindow
 from peeko.settings import Settings
 from peeko.ui.chat_window import (
+    LISTENING_TEXT,
+    MIC_LABEL,
+    MIC_STOP_LABEL,
     ROLE_NOTICE,
     ROLE_PEEKO,
     ROLE_USER,
     THINKING_TEXT,
+    VOICE_DISABLED_TEXT,
     ChatEntry,
     ChatWindow,
     build_banner_text,
+    build_heard_text,
 )
 from peeko.ui.context_menu import TALK_ID, future_entries, find_entry
+from peeko.voice.audio import UnavailableAudioSource
+from peeko.voice.errors import STTProviderError
+from peeko.voice.input import SpeechRecognizer
+from peeko.voice.providers import MockTranscriptionProvider
 from tests.conftest import (
     TEST_API_KEY,
     TEST_BASE_URL,
+    FakeAudioSource,
     FakeTransport,
     ai_client,
     ai_settings,
     completion_body,
+    pcm_samples,
     synchronous_submit,
+    synchronous_submit_capture,
+    voice_recognizer,
+    voice_settings,
     wait_for,
 )
 
@@ -723,4 +737,412 @@ def test_the_first_render_invites_the_user_and_stays_clean(qapp, tmp_path, role)
         assert "Say hello to Peeko" not in window._transcript.toPlainText()
     finally:
         window.deleteLater()
+        qapp.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: voice input — the Mic button, the listening state, honesty
+# --------------------------------------------------------------------------- #
+HEARD = "what is the weather like"
+
+
+class FakeVoiceTask:
+    """A cancellable stand-in for the worker task the window holds."""
+
+    def __init__(self) -> None:
+        self.cancelled = 0
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+
+
+def stalled_submit_voice():
+    """A ``submit_voice`` double that starts nothing but hands back a task.
+
+    Used for the state-machine assertions (start/stop/close) where no result
+    should arrive at all — the arrival path is covered separately with
+    :func:`tests.conftest.synchronous_submit_capture`.
+    """
+    tasks: list[FakeVoiceTask] = []
+
+    def submit(recognizer, *, signals=None, max_duration_s=None, pool=None):
+        task = FakeVoiceTask()
+        tasks.append(task)
+        return task
+
+    submit.tasks = tasks  # type: ignore[attr-defined]
+    return submit
+
+
+def test_the_mic_button_is_part_of_the_window(qapp, tmp_path):
+    window, _ = make_window(tmp_path)
+    try:
+        button = window.findChild(type(window._mic_button), "chat_mic")
+        assert button is not None
+        assert button.text() == MIC_LABEL
+        assert "microphone" in button.toolTip().lower()
+        assert window.mic_text() == MIC_LABEL
+        assert window.is_listening() is False
+        assert window.voice_enabled() is True
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_hint_tells_the_user_that_mic_only_fills_the_message_box(
+    qapp, tmp_path
+):
+    window, _ = make_window(tmp_path)
+    try:
+        hint = next(
+            widget.text() for widget in window.findChildren(QLabel)
+            if widget.objectName() == "chat_hint"
+        )
+        assert "Mic listens through your microphone (Stage 4)" in hint
+        assert "nothing is sent until you press Send" in hint
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_switching_voice_off_still_shows_the_button_and_explains_itself(
+    qapp, tmp_path
+):
+    """No dead button: a click on a disabled Microphone says why."""
+    settings = voice_settings(tmp_path, enabled=False)
+    window = ChatWindow(settings, submit=synchronous_submit())
+    try:
+        assert window.voice_enabled() is False
+        assert window.mic_text() == MIC_LABEL     # never a hidden control
+        assert "PEEKO_VOICE_ENABLED" in window._mic_button.toolTip()
+        assert window.voice_problem() == VOICE_DISABLED_TEXT
+
+        assert window.start_listening() is False
+        assert window.is_listening() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "PEEKO_VOICE_ENABLED=1" in notice.text
+        assert window.status_text() == ""         # nothing is "listening"
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_settings_toggle_is_picked_up_when_the_window_refreshes(
+    qapp, tmp_path
+):
+    window = ChatWindow(voice_settings(tmp_path, enabled=False),
+                        submit=synchronous_submit())
+    try:
+        assert window.voice_enabled() is False
+        window._settings = voice_settings(tmp_path, enabled=True)
+        assert window.refresh_configuration() is True
+        assert window.voice_enabled() is True
+        assert "PEEKO_VOICE_ENABLED" not in window._mic_button.toolTip()
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_clicking_mic_listens_and_shows_the_state(qapp, tmp_path):
+    seen: list[bool] = []
+    window, _ = make_window(
+        tmp_path,
+        recognizer=voice_recognizer(text=HEARD),
+        submit_voice=synchronous_submit_capture(),
+    )
+    window.listeningChanged.connect(seen.append)
+    try:
+        assert window.start_listening() is True
+        assert window.is_listening() is True
+        assert window.status_text() == LISTENING_TEXT
+        assert window.mic_text() == MIC_STOP_LABEL
+        assert seen == [True]
+
+        # The words arrive through the event loop, as they do in the app.
+        assert wait_for(lambda: window.is_listening() is False, timeout_s=5.0)
+        assert seen == [True, False]
+        assert window.mic_text() == MIC_LABEL
+        assert window.status_text() == ""
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_transcript_lands_in_the_message_box_and_is_not_sent(
+    qapp, tmp_path
+):
+    window, transport = make_window(
+        tmp_path,
+        recognizer=voice_recognizer(text=HEARD),
+        submit_voice=synchronous_submit_capture(),
+    )
+    try:
+        assert window.send_message("") is False   # nothing to send yet
+        window.start_listening()
+        assert wait_for(
+            lambda: window.input_text() == HEARD, timeout_s=5.0
+        ), "the transcript never reached the message box"
+
+        assert transport.call_count == 0          # nothing was sent
+        assert window.entries()[-1].role == ROLE_NOTICE
+        assert window.entries()[-1].error is False
+        assert build_heard_text(HEARD) == window.entries()[-1].text
+        assert "press Send" in window.entries()[-1].text
+
+        # …and the user can send it (or fix a word first).
+        assert window.send_message() is True
+        assert transport.call_count == 1
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_transcript_is_not_invented_when_nothing_was_heard(qapp, tmp_path):
+    window, _ = make_window(
+        tmp_path,
+        recognizer=voice_recognizer(text=""),
+        submit_voice=synchronous_submit_capture(),
+    )
+    try:
+        window.start_listening()
+        assert wait_for(lambda: window.is_listening() is False, timeout_s=5.0)
+        assert window.input_text() == ""
+        assert "Heard:" not in window.transcript_text()
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_clicking_mic_again_stops_the_capture_and_drops_the_result(
+    qapp, tmp_path
+):
+    submit = synchronous_submit_capture()
+    window, _ = make_window(
+        tmp_path, recognizer=voice_recognizer(text=HEARD), submit_voice=submit,
+    )
+    try:
+        assert window.start_listening() is True
+        assert window.stop_listening() is True
+        assert window.is_listening() is False
+        assert window.status_text() == ""
+
+        # The queued result arrives after the stop: it is dropped, silently.
+        for _ in range(50):
+            qapp.processEvents()
+        assert window.input_text() == ""
+        assert "Heard:" not in window.transcript_text()
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_mic_button_toggles_listening(qapp, tmp_path):
+    submit = stalled_submit_voice()
+    window, _ = make_window(
+        tmp_path, recognizer=voice_recognizer(text=HEARD), submit_voice=submit,
+    )
+    try:
+        button = window.findChild(type(window._mic_button), "chat_mic")
+        button.click()
+        assert window.is_listening() is True
+        assert button.text() == MIC_STOP_LABEL
+        button.click()
+        assert window.is_listening() is False
+        assert submit.tasks[0].cancelled == 1
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_closing_the_window_stops_the_capture(qapp, tmp_path):
+    submit = stalled_submit_voice()
+    window, _ = make_window(
+        tmp_path, recognizer=voice_recognizer(text=HEARD), submit_voice=submit,
+    )
+    try:
+        window.show()
+        assert window.start_listening() is True
+        window.close()
+        assert window.is_listening() is False
+        assert submit.tasks[0].cancelled == 1
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_failing_provider_is_reported_without_a_fake_transcript(
+    qapp, tmp_path
+):
+    window, transport = make_window(
+        tmp_path,
+        recognizer=voice_recognizer(provider=MockTranscriptionProvider(
+            error=STTProviderError(
+                "The speech service answered with HTTP 500."
+            )
+        )),
+        submit_voice=synchronous_submit_capture(),
+    )
+    try:
+        assert window.start_listening() is True
+        assert wait_for(
+            lambda: window.entries() and window.entries()[-1].error is True,
+            timeout_s=5.0,
+        ), "the voice failure was never shown"
+
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE
+        assert "HTTP 500" in notice.text
+        assert window.input_text() == ""          # no invented transcript
+        assert "Heard:" not in window.transcript_text()
+        assert window.is_listening() is False
+        assert window.status_text() == ""
+        assert transport.call_count == 0          # the chat was untouched
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_missing_key_is_reported_when_mic_is_pressed(qapp, tmp_path):
+    source = FakeAudioSource([pcm_samples(1_600, amplitude=1_200)])
+    recognizer = SpeechRecognizer.from_settings(
+        voice_settings(tmp_path, key=""), source=source,
+    )
+    window, transport = make_window(tmp_path, recognizer=recognizer)
+    try:
+        assert window.start_listening() is False
+        assert source.open_calls == 0             # no audio device touched
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "PEEKO_AI_API_KEY" in notice.text
+        assert window.is_listening() is False
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_no_microphone_is_reported_honestly(qapp, tmp_path):
+    recognizer = SpeechRecognizer(
+        source=UnavailableAudioSource(),
+        provider=MockTranscriptionProvider(HEARD),
+    )
+    window, _ = make_window(tmp_path, recognizer=recognizer)
+    try:
+        assert window.start_listening() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "no microphone" in notice.text
+        assert window.is_listening() is False
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_broken_submit_is_reported_instead_of_raising(qapp, tmp_path):
+    def broken_submit(*_args, **_kwargs):
+        raise RuntimeError("cannot start the voice worker")
+
+    window, _ = make_window(
+        tmp_path, recognizer=voice_recognizer(text=HEARD),
+        submit_voice=broken_submit,
+    )
+    try:
+        assert window.start_listening() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert window.is_listening() is False
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_recognizer_is_rebuilt_from_settings_unless_one_is_injected(
+    qapp, tmp_path
+):
+    """A .env edit is picked up by the next Mic press, like the AI client."""
+    window, _ = make_window(tmp_path)
+    try:
+        first = window.recognizer()
+        assert window.recognizer() is not first     # rebuilt from settings
+        assert first.source.name == "sounddevice"
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+    injected = voice_recognizer(text=HEARD)
+    window, _ = make_window(tmp_path, recognizer=injected)
+    try:
+        assert window.recognizer() is injected
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_request_and_a_capture_never_confuse_each_other(qapp, tmp_path):
+    """A capture and a request may overlap, each with its own state.
+
+    While the microphone is open the listening hint stays on screen (it is the
+    more actionable line, and it is true), and the request runs regardless.
+    """
+    window, transport = make_window(
+        tmp_path, recognizer=voice_recognizer(text=HEARD),
+        submit_voice=synchronous_submit_capture(),
+    )
+    try:
+        window.start_listening()
+        assert window.status_text() == LISTENING_TEXT
+        assert window.send_message("typed while listening") is True
+        assert transport.call_count == 1               # the request went out
+        assert window.is_listening() is True           # the mic stays open
+        assert window.status_text() == LISTENING_TEXT
+
+        assert wait_for(
+            lambda: not window.is_thinking() and not window.is_listening(),
+            timeout_s=5.0,
+        )
+        assert window.status_text() == ""
+        # Neither the typed message nor the heard one was lost.
+        roles = [entry.role for entry in window.entries()]
+        assert ROLE_USER in roles and ROLE_PEEKO in roles
+        assert any(entry.text.startswith("Heard:")
+                   for entry in window.entries())
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# The bridge to the avatar: the robot shows it is listening
+# --------------------------------------------------------------------------- #
+def test_the_avatar_shows_the_listening_pose(qapp, tmp_path):
+    avatar = AvatarWindow(ai_settings(tmp_path))
+    try:
+        assert avatar.play_listening(True) == "listening"
+        assert avatar._machine.state == "listening"
+        assert avatar._machine.listening is True
+        assert avatar.play_listening(False) == "idle"
+        assert avatar._machine.state == "idle"
+        assert avatar._machine.listening is False
+        assert avatar.play_listening(False) is None    # already ended
+    finally:
+        avatar.hide()
+        avatar.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_chat_window_tells_the_avatar_it_is_listening(qapp, tmp_path):
+    """The real wiring: window.listeningChanged -> the robot's pose."""
+    avatar = AvatarWindow(ai_settings(tmp_path))
+    try:
+        action = next(a for a in avatar._menu.actions() if a.data() == TALK_ID)
+        avatar._on_menu_triggered(action)
+        window = avatar._chat_window
+
+        window.listeningChanged.emit(True)
+        assert avatar._machine.state == "listening"
+        window.listeningChanged.emit(False)
+        assert avatar._machine.state == "idle"
+    finally:
+        avatar.hide()
+        avatar.deleteLater()
         qapp.processEvents()

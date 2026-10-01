@@ -42,6 +42,32 @@ keys yourself via a local `.env` file and run it on your own machine.
   legal action is `null`, so nothing an AI reply says can run a command or
   touch your computer. The only things a reply can change are the text in the
   chat window and which existing animation the robot plays.
+- ✅ **Voice input — talk instead of typing** (Stage 4): click **Mic** in the
+  chat window and speak. Peeko records through your microphone, asks an
+  OpenAI-compatible speech-to-text endpoint (OpenAI Whisper, a gateway, or a
+  local server) for the words, and drops the transcript into the message box —
+  **nothing is sent to Peeko until you press Send**, so you can fix a misheard
+  word first. Click Mic again (or close the window) to stop; a recording stops
+  itself after `PEEKO_VOICE_MAX_SECONDS`. While Peeko listens the robot plays a
+  sustained "ears open" listening pose and the window shows
+  *"Listening… speak now…"*.
+- ✅ **Voice input is honest and private** (Stage 4): every failure —
+  no API key, no microphone, permission refused, the OS refusing access, a
+  capture error, an HTTP error, a timeout, an unreadable reply — is reported in
+  plain words in the transcript, and Peeko **never invents a transcript** (a
+  cancelled or silent capture says nothing at all). Your audio is held in memory
+  only (`capture_clip` returns a clip; nothing in the voice package writes a
+  file) and is uploaded to exactly one place: the endpoint you configured.
+  `PEEKO_VOICE_ENABLED=0` switches the microphone off completely — Peeko then
+  never opens an audio device and the Mic button explains why instead of
+  pretending.
+- ✅ **Voice input never freezes the robot** (Stage 4): recording and the HTTP
+  round trip both run on a worker thread, so the animation keeps ticking, you
+  can keep typing and you can close the window while it listens.
+- ✅ **No audio hard dependency** (Stage 4): the audio library (`sounddevice`)
+  is optional and imported lazily. Without it — or on a machine with no
+  microphone — Peeko still starts, the robot still animates, and pressing Mic
+  says exactly what is missing.
 - ✅ **Right-click interaction menu** (Stage 2): *Talk*, *Feed*, *Pet*,
   *Play*, *Sleep*, *Wake Up*, *Check Status…*, *Settings…* and *Quit* — all
   in their final places. Entries whose feature arrives in a later stage are
@@ -78,9 +104,9 @@ keys yourself via a local `.env` file and run it on your own machine.
   keeps animating while a window is open. No sleeps anywhere.
 - ✅ **Headless smoke test**: `PEEKO_SMOKE_TEST=1` auto-quits ~2 s after
   launch with exit code 0, so CI/headless boxes can verify the whole app.
-- 🔜 **Coming in later stages**: AI chat, voice input, text-to-speech,
-  emotions, virtual-pet needs, persistent memory, app awareness, autonomous
-  life, polish, packaging, final testing.
+- 🔜 **Coming in later stages**: text-to-speech, emotions, virtual-pet needs,
+  persistent memory, app awareness, autonomous life, polish, packaging, final
+  testing.
 
 ## Tech stack
 
@@ -143,9 +169,14 @@ cp .env.example .env   # optional — Peeko works with defaults alone
 | `PEEKO_AI_API_KEY`      | 3     | **Secret** — your AI API key (needed to chat; never logged) | *(empty)*       |
 | `PEEKO_AI_BASE_URL`     | 3     | API root; any OpenAI-compatible endpoint (or a local model) | `https://api.openai.com/v1` |
 | `PEEKO_AI_TIMEOUT_S`    | 3     | How long to wait for an answer, in seconds                 | `30`            |
-| `PEEKO_VOICE_INPUT_ENGINE` | 4  | Voice input engine (Stage 4)                              | *(empty)*       |
-| `PEEKO_TTS_ENGINE`      | 5     | Text-to-speech engine (Stage 5)                           | *(empty)*       |
-| `PEEKO_TTS_VOICE`       | 5     | TTS voice identifier (Stage 5)                            | *(empty)*       |
+| `PEEKO_VOICE_ENABLED`   | 4     | Master switch for the microphone (`0` = never open a device) | `1` (on)      |
+| `PEEKO_VOICE_INPUT_ENGINE` | 4  | Voice input engine: `openai` / `openai-compatible` (`whisper` is an alias) | `openai-compatible` |
+| `PEEKO_STT_MODEL`       | 4     | Transcription model, e.g. `whisper-1`                      | engine default  |
+| `PEEKO_STT_BASE_URL`    | 4     | Speech-to-text API root (falls back to `PEEKO_AI_BASE_URL`) | `PEEKO_AI_BASE_URL`, then engine default |
+| `PEEKO_VOICE_TIMEOUT_S` | 4     | How long to wait for a transcription, in seconds           | `60`            |
+| `PEEKO_VOICE_MAX_SECONDS` | 4   | Hard cap on one recording, in seconds                      | `30`            |
+| `PEEKO_TTS_ENGINE`      | 5     | Text-to-speech engine (Stage 5 — no effect yet)            | *(empty)*       |
+| `PEEKO_TTS_VOICE`       | 5     | TTS voice identifier (Stage 5 — no effect yet)             | *(empty)*       |
 
 Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
@@ -298,10 +329,17 @@ peeko/
    ├── vocabulary.py the allowed emotions / animations / actions
    ├── errors.py     honest, key-free AI error messages
    └── worker.py     Qt bridge: runs requests off the UI thread
-├── voice/             voice input (Stage 4) + TTS (Stage 5), interface only
+├── voice/             voice input (Stage 4); TTS is still a stub (Stage 5)
+   ├── __init__.py     the package's public surface (one import point)
+   ├── audio.py       microphone capture + the AudioSource seam (lazy audio)
+   ├── providers.py   speech-to-text seam + the OpenAI-compatible provider
+   ├── input.py       SpeechRecognizer: microphone in -> words out
+   ├── worker.py      Qt bridge: runs a capture off the UI thread
+   ├── errors.py      honest, key-free voice error messages
+   └── output.py      text-to-speech — Stage 5 stub, raises NotImplementedError
 ├── emotions/          PAD emotional-state model (real data model at Stage 0)
 ├── needs/             virtual-pet needs model + decay logic (real at Stage 0)
-├── memory/            persistent memory — Stage 4, interface only
+├── memory/            persistent memory — Stage 8, interface only
 ├── awareness/         active-app awareness — Stage 8, interface only
 ├── db/                SQLite connection + schema versioning (real at Stage 0)
 └── ui/                Stage 2 interaction layer
@@ -342,41 +380,66 @@ peeko/
 - The AI package deliberately never imports `peeko.avatar` or `peeko.ui`
   (a test enforces this), and no AI module can run a command — model output
   is data, never instructions.
-- `voice`, `memory`, `awareness` still ship as **honest interfaces**: their
-  methods raise `NotImplementedError` naming the target stage — no fake
-  buttons, no pretend features.
+- Inside `voice` (Stage 4): `audio.py` owns the microphone behind the
+  `AudioSource` seam — one real `sounddevice` implementation (imported lazily,
+  so the library stays optional) and an honest "no microphone" source.
+  `input.py`'s `SpeechRecognizer` glues a source to a provider: capture the
+  audio, hand it to speech-to-text, return the words (or `None`). `providers.py`
+  holds the provider seam — one real OpenAI-compatible `/audio/transcriptions`
+  provider (stdlib HTTP) plus a mock used by tests — and `errors.py` keeps every
+  message honest and free of the API key. `worker.py` runs a whole capture on a
+  `QThreadPool` worker, exactly like the AI worker, so `ui/chat_window.py` (Mic
+  button, "Listening…" line) never blocks; it tells the avatar through
+  `listeningChanged`, and `avatar/expressions.py` maps that onto the optional
+  sustained `listening` pose.
+- The voice package deliberately never imports `peeko.ui` or `peeko.avatar`, and
+  `capture_clip` never writes audio to disk. `peeko.ui.chat_window` stays free
+  of `sounddevice` too: everything testable is injectable, which is why the
+  whole feature is unit-tested on a machine with no microphone.
+- `memory` and `awareness` still ship as **honest interfaces**: their methods
+  raise `NotImplementedError` naming the target stage — no fake buttons, no
+  pretend features. `voice/output.py` (text-to-speech) is the same kind of
+  honest Stage 5 stub.
 
 ## Current development stage
 
-**Stage 3 of 13 — AI chat (completed).** The robot can now hold a typed
-conversation in its own window, while it keeps floating on your desktop:
+**Stage 4 of 13 — voice input (completed).** Peeko can now *hear* you instead
+of only reading you:
 
-1. **Talk** in the right-click menu opens the chat window (`ui/chat_window.py`):
-   your messages and Peeko's replies in one transcript, a Send button, Enter
-   to send, Esc to close, and a "Peeko is thinking…" line while an answer is
-   on its way;
-2. **structured context in** — every message carries Peeko's situation
-   (emotion, happiness, energy, hunger, sleepiness, friendship, current app,
-   recent interactions, memory) as one JSON block. Real data where a real
-   subsystem exists (the interaction log records clicks, drags and chat turns
-   today); documented placeholders everywhere else, so Stages 6 (emotions),
-   7 (needs), 8 (memory) and 9 (app awareness) only have to pass their live
-   values in;
-3. **structured, validated output** — `{"response", "emotion", "animation",
-   "action"}`. Emotion and animation must come from hard-coded allowed lists
-   and `action` must be `null`; anything else falls back to the documented
-   default and is reported. A reply can therefore only change the text in the
-   chat window and which existing animation the robot plays;
-4. **personality** — a defined, versioned persona (cute, warm, playful,
-   curious, short-winded, honest about what it cannot do) that is prepended to
-   every conversation;
-5. **engine-agnostic providers** — one real OpenAI-compatible
-   chat-completions provider (stdlib HTTP, base URL + model from `.env`), so
-   OpenAI, a gateway, a local server or an aggregator all work by
-   configuration;
-6. **never blocking, never faking** — requests run on a worker thread; a
-   missing key, a timeout, a network failure or an unreadable reply produces
-   an honest message in the transcript, not a pretend answer.
+1. **Mic in the chat window** — right-click the robot → *Talk* (or the
+   microphone button already in the window) and press **Mic**. While Peeko
+   listens it says *"Listening… speak now…"*, the button turns into **Stop**,
+   and the robot plays a sustained, "ears open" listening pose;
+2. **microphone in, words out** — `capture_clip()` records through
+   `sounddevice` in 16-bit mono chunks and stops on its own after
+   `PEEKO_VOICE_MAX_SECONDS`; `SpeechRecognizer` hands the clip to the
+   speech-to-text provider and returns the transcript;
+3. **engine-agnostic speech-to-text** — one real OpenAI-compatible
+   `/audio/transcriptions` provider (stdlib HTTP, multipart upload, model, base
+   URL and timeout from `.env`), so OpenAI Whisper, a gateway or a local server
+   all work by configuration (the base URL falls back to `PEEKO_AI_BASE_URL`, so
+   one gateway configures chat *and* dictation);
+4. **the transcript is never sent for you** — the words land in the message box
+   with a *"Heard: … — fix it if I misheard, then press Send"* note, so a
+   misheard word is a correction, not a wrong message;
+5. **nothing blocks** — recording and the HTTP round trip run on a worker
+   thread; the animation keeps ticking, typing keeps working and closing the
+   window stops the capture;
+6. **never faking, never leaking** — a missing key, no microphone, refused
+   permission, a busy device, a capture failure, an HTTP error, a timeout and an
+   unreadable reply each produce their own plain-language note and **no
+   transcript at all**; audio stays in memory, is uploaded only to the endpoint
+   you configured, and the API key never appears in a log line or a message.
+
+Stage 3 — AI chat (completed). The robot can hold a typed conversation in its
+own window while it keeps floating on your desktop: a transcript with Enter to
+send and Esc to close, a "Peeko is thinking…" line, a versioned personality, a
+structured context about Peeko's situation sent with every message, a
+validated JSON reply (response / emotion / animation / action) whose emotion and
+animation must come from hard-coded allowed lists and whose only legal action is
+`null` — so nothing an AI reply says can run a command or touch your computer —
+and requests on a worker thread, with honest messages for a missing key, a
+timeout, a network failure or an unreadable reply.
 
 Stage 2 — basic interaction (completed). Stage 0 delivered the
 project foundation (modular package, settings, logging, errors, SQLite,
@@ -414,28 +477,42 @@ begins.
   meant to be replaced — see
   [Avatar artwork](#avatar-artwork--swap-in-your-own-robot). Nothing about
   the placeholder is hard-coded in the engine.
-- The character only knows its Stage 1–2 behaviours (idle, blink, glance,
-  click, double-click, hover, drag, "huh?"). It cannot chat, feel or need
-  anything yet — those are Stages 3–7.
+- The character only knows its Stage 1–4 behaviours (idle, blink, glance,
+  click, double-click, hover, drag, "huh?", listening). It cannot speak, feel or
+  need anything yet — those are Stages 5–7.
 - **The remaining pet actions (Feed, Pet, Play, Sleep, Wake Up) do not do
   anything yet.** They are deliberately visible and labelled `— Stage N (not
   implemented)`, and picking one opens an explanation rather than pretending.
-  The voice/TTS settings exist but have no effect until Stages 4–5.
+  The TTS settings exist but have no effect until Stage 5.
 - **A real conversation needs your own API key.** Peeko has no cloud
   backend: set `PEEKO_AI_API_KEY` (and `PEEKO_AI_MODEL`) in `.env` to chat.
   Without a key the chat window says so and no request is ever attempted.
   The automated tests use a mock provider and a fake HTTP transport — they
   never need a key and never touch the network, so a green test run proves
   the plumbing, not a live conversation.
+- **Voice input needs a microphone, the optional `sounddevice` package and the
+  same API key.** Install it with `pip install "peeko[voice]"` (or
+  `pip install sounddevice`). Without it, Peeko starts normally and pressing Mic
+  explains what is missing — the robot never crashes over audio.
+- **A real microphone and a live speech-to-text call have not been tested by
+  us.** Peeko is built and tested on a headless machine with no microphone and
+  no API key, so the microphone capture, the live `/audio/transcriptions` call
+  and the listening pose were verified with injected fakes, a mock provider and
+  a recording HTTP transport instead of real hardware. The plumbing, the
+  cancellation path, the off-thread behaviour and every error path are covered
+  by tests, but **you will be the first person to speak into it** — if a real
+  device misbehaves you will see a plain-language note rather than a fake
+  transcript, and the `PEEKO_VOICE_*` variables in `.env` are where to adjust
+  how long it listens and waits.
 - **Settings is read-only.** You can see the configuration Peeko runs with,
   but editing it from the UI is not implemented yet — use `.env` or
   environment variables.
-- **Voice input, TTS, persistent memory and app awareness are not
-  implemented yet** — their config variables exist but have no effect, and
-  their interfaces raise `NotImplementedError` on purpose. Peeko's chat does
-  not remember anything between runs until the memory stage lands, and its
-  mood/needs in the AI context are still documented placeholders until
-  Stages 6–7.
+- **Text-to-speech, persistent memory and app awareness are not implemented
+  yet** — their config variables exist but have no effect, and their interfaces
+  raise `NotImplementedError` on purpose. Peeko's chat does not remember
+  anything between runs until the memory stage lands, and its mood/needs in the
+  AI context are still documented placeholders until Stages 6–7. Listening is
+  voice *input* only: Peeko cannot speak back yet.
 - **Peeko cannot control your computer.** It can chat and play an expression;
   that is all. The chat window says so, and the `action` field of every
   AI reply is forced to `null`.

@@ -29,12 +29,14 @@ from peeko.avatar.state_machine import (
     DRAGGING,
     HOVER,
     IDLE,
+    LISTENING,
     LOOK_DOWN,
     LOOK_LEFT,
     LOOK_MAX_MS,
     LOOK_RIGHT,
     LOOK_UP,
     REACTION_STATES,
+    SUSTAINED_STATES,
     AvatarStateMachine,
 )
 from peeko.errors import StartupError
@@ -656,3 +658,133 @@ def test_a_missing_core_animation_still_fails_loudly(
     )
     with pytest.raises(StartupError, match="dragging"):
         AvatarStateMachine(load_manifest(path))
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: the sustained listening state (voice input)
+# --------------------------------------------------------------------------- #
+def test_the_artwork_can_show_the_listening_state(machine):
+    assert machine.listening_available is True
+    assert machine.listening is False
+    assert machine.can_play(LISTENING) is True
+    assert machine.state_animation_map[LISTENING] == LISTENING
+
+
+def test_start_listening_plays_the_state_and_holds_it(machine):
+    """A capture lasts as long as the user talks — so must the pose."""
+    assert machine.start_listening() is True
+    assert machine.state == LISTENING
+    assert machine.listening is True
+    assert machine.current_animation == "listening"
+
+    # No settling back to idle, and no spontaneous blink/glance either.
+    advance(machine, 1_500.0)
+    assert machine.state == LISTENING
+    assert machine.listening is True
+
+
+def test_a_one_shot_listening_animation_keeps_playing(machine, avatar_assets,
+                                                      manifest_data):
+    """The state is sustained by the engine, whatever the artwork says."""
+    from conftest import write_avatar_assets
+
+    manifest_data["animations"]["listening"]["loop"] = False
+    path = write_avatar_assets(Path(avatar_assets).parent, manifest_data)
+    one_shot = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert one_shot.start_listening() is True
+    advance(one_shot, 500.0)                # past its two 100 ms frames
+    assert one_shot.state == LISTENING
+    assert one_shot.listening is True
+
+
+def test_stop_listening_returns_to_idle(machine):
+    machine.start_listening()
+    assert machine.stop_listening() is True
+    assert machine.state == IDLE
+    assert machine.listening is False
+    assert machine.stop_listening() is False   # nothing was playing any more
+    assert machine.state == IDLE
+
+
+def test_stop_listening_without_a_capture_is_ignored(machine):
+    assert machine.stop_listening() is False
+    assert machine.listening is False
+    assert machine.state == IDLE
+
+
+def test_start_listening_is_declined_while_the_robot_is_being_dragged(machine):
+    """User input always wins: a drag is never interrupted by the robot."""
+    machine.press()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+
+    assert machine.start_listening() is False
+    assert machine.listening is False
+    assert machine.state == DRAGGING
+
+
+def test_start_listening_is_declined_while_the_mouse_button_is_held(machine):
+    machine.press()
+    assert machine.start_listening() is False
+    assert machine.listening is False
+    assert machine.state == IDLE
+
+
+def test_a_drag_wins_over_the_pose_and_it_resumes_afterwards(machine):
+    """The microphone is still open, so the pose comes back on release."""
+    machine.start_listening()
+    machine.press()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+    assert machine.listening is True
+
+    machine.release(moved=True)
+    advance(machine, STEP_MS * 2)
+    assert machine.state == LISTENING
+    assert machine.listening is True
+
+
+def test_a_state_machine_cue_does_not_interrupt_listening(machine):
+    """The listening pose is the user's own request — a cue waits its turn."""
+    machine.start_listening()
+    assert machine.play_cued(DOUBLE_CLICK) is False
+    assert machine.state == LISTENING
+    assert machine.current_animation == "listening"
+
+
+def test_a_reaction_still_plays_after_listening_stops(machine):
+    machine.start_listening()
+    machine.stop_listening()
+    assert machine.play_cued(HOVER) is True
+    assert machine.state == HOVER
+
+
+def test_listening_is_switched_off_when_the_manifest_lacks_it(
+    avatar_assets, manifest_data
+):
+    """Stage 1-3 artwork keeps working — it just shows no listening pose."""
+    path = _manifest_without(avatar_assets, manifest_data, "listening")
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.listening_available is False
+    assert LISTENING not in machine.state_animation_map
+    assert machine.can_play(LISTENING) is False
+
+    # Every entry point stays silent instead of raising.
+    assert machine.start_listening() is False
+    assert machine.stop_listening() is False
+    assert machine.listening is False
+    assert machine.state == IDLE
+    assert machine.current_animation == "idle"
+
+
+def test_a_sustained_state_is_not_a_reaction(machine):
+    """Reactions are one-shot and cued; listening is neither."""
+    assert LISTENING in SUSTAINED_STATES
+    assert LISTENING not in REACTION_STATES
+    assert machine.reaction_available(LISTENING) is False
+    assert machine.available_reactions == frozenset(
+        {HOVER, DOUBLE_CLICK, CONFUSED}
+    )
+    assert SUSTAINED_STATES == (LISTENING,)

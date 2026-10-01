@@ -19,6 +19,11 @@ Rules:
   optional — see :mod:`peeko.avatar.state_machine`) → ``idle``;
 * never interrupts dragging or an active click (the state machine decides,
   see :meth:`peeko.avatar.state_machine.AvatarStateMachine.play_cued`).
+
+Stage 4 (voice input) uses the same seam from the other direction: the chat
+window says "a capture started/stopped", and :func:`apply_listening` shows or
+ends the sustained ``listening`` state — the only state that does not settle
+back to idle on its own.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from peeko.avatar.state_machine import (
     DOUBLE_CLICK,
     HOVER,
     IDLE,
+    LISTENING,
     LOOK_DOWN,
     LOOK_LEFT,
     LOOK_RIGHT,
@@ -58,6 +64,11 @@ ANIMATION_STATE_MAP: dict[str, str] = {
 
 #: What Peeko plays when the AI asks for something he cannot do.
 FALLBACK_STATE = IDLE
+
+#: What Peeko plays while a voice capture is running (Stage 4). Optional
+#: artwork: without a ``listening`` animation nothing is played, and the chat
+#: window's own "listening…" indicator is what tells the user.
+LISTENING_STATE = LISTENING
 
 
 def expression_state(animation: str, machine) -> str:
@@ -93,10 +104,37 @@ def known_animations() -> tuple[str, ...]:
     return tuple(ANIMATION_STATE_MAP)
 
 
+# --------------------------------------------------------------------------- #
+# Stage 4: the voice-input listening state
+# --------------------------------------------------------------------------- #
+def listening_available(machine) -> bool:
+    """Can the current artwork show the listening animation at all?"""
+    return bool(machine.can_play(LISTENING))
+
+
+def apply_listening(machine, listening: bool) -> str | None:
+    """Show (or end) the listening animation for a voice capture.
+
+    :param machine: the avatar state machine.
+    :param listening: ``True`` when a capture started, ``False`` when it
+        ended.
+    :returns: the state played, or ``None`` when the machine declined — the
+        artwork has no ``listening`` animation, or the user is dragging the
+        robot right now. The chat window keeps showing its own "listening…"
+        indicator either way, so a decline is never a lie.
+    """
+    if listening:
+        return LISTENING if machine.start_listening() else None
+    return IDLE if machine.stop_listening() else None
+
+
 __all__ = [
     "ANIMATION_STATE_MAP",
     "FALLBACK_STATE",
+    "LISTENING_STATE",
     "apply_expression",
+    "apply_listening",
     "expression_state",
     "known_animations",
+    "listening_available",
 ]

@@ -81,10 +81,14 @@ animation it uses, and any of them can be remapped via
 | -------- | ------------------------------------------------------------------ | --------- |
 | Core     | `idle`, `blink`, `look_left`, `look_right`, `look_up`, `look_down`, `click`, `dragging` | **Yes** — a missing one fails loudly at startup |
 | Reaction | `hover` (pointer enters), `double_click`, `confused` (a menu entry that is not implemented yet) | No — a missing one simply switches that reaction off |
+| Sustained | `listening` (a voice recording is running — Stage 4)              | No — a missing one simply means the robot shows no listening pose |
 
 Reactions are one-shot animations that return to `idle` when they finish.
-They are deliberately optional so artwork written for Stage 1 keeps working
-unchanged; it just has fewer reactions.
+The `listening` state is different: it stays until the recording stops, so
+author it as a **looping** animation (the engine also keeps a one-shot
+`listening` animation replaying, so either works). All three kinds are
+optional so artwork written for Stage 1 keeps working unchanged; it just has
+fewer reactions.
 
 ## Tips
 

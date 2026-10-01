@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "peeko"
 version = "0.1.0"
-description = "Peeko — a cute, animated desktop robot companion living on your desktop (Stage 2: basic interaction)."
+description = "Peeko — a cute, animated desktop robot companion living on your desktop (Stage 4: voice input)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -29,6 +29,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Stage 4 voice input needs a microphone library. It is deliberately OPTIONAL:
+# `peeko.voice.audio` imports `sounddevice` lazily, so Peeko installs, starts and
+# animates without it — pressing Mic then says exactly what is missing.
+voice = [
+    "sounddevice>=0.4.6",
+]
 dev = [
     "pytest>=8.0",
 ]

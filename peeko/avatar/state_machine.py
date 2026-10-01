@@ -31,6 +31,16 @@ their animations still runs, it simply has fewer reactions (see
 :meth:`AvatarStateMachine.available_reactions`). The core states above are
 mandatory — a manifest missing one of them fails loudly at startup.
 
+Stage 4 adds one **sustained** state for voice input:
+
+* ``listening``  — an attentive, looping "ears open" animation shown while
+  the microphone is open. Unlike a reaction it does not settle back to idle
+  by itself: it stays until :meth:`AvatarStateMachine.stop_listening` is
+  called. Dragging still wins while it lasts — the dragging wiggle plays, and
+  the listening pose resumes when the user lets go, because the microphone is
+  still open. Also optional artwork, so a manifest without it simply shows no
+  listening animation (the chat window still says it is listening).
+
 Transitions (all timers are decremented by :meth:`tick`, so nothing ever
 blocks; there are no sleeps anywhere):
 
@@ -46,7 +56,10 @@ blocks; there are no sleeps anywhere):
   a ``double_click`` reaction in progress is never downgraded to a click)
 * ``double_click()``                  (-> ``double_click``, replays on repeat)
 * ``confused()``                      (-> ``confused``)
-* any one-shot animation finishing    (-> ``idle``)
+* ``start_listening()``                (``idle`` -> ``listening``, held until
+  ``stop_listening()``; declined while dragging or without the artwork)
+* ``stop_listening()``                 (``listening`` -> ``idle``)
+* any one-shot animation finishing    (-> ``idle``, or back to ``listening``)
 
 The machine is Qt-free so it is trivially unit-testable; the Qt widget
 simply calls :meth:`tick` from a ``QTimer`` and repaints ``frame``.
@@ -78,6 +91,12 @@ HOVER = "hover"
 DOUBLE_CLICK = "double_click"
 CONFUSED = "confused"
 
+# -- Stage 4: sustained states ---------------------------------------------- #
+#: "I am listening to you" (voice input). Unlike a reaction this is not a
+#: one-shot: it keeps playing until something stops it, so the robot visibly
+#: stays in listening mode for as long as the microphone is open.
+LISTENING = "listening"
+
 LOOK_DIRECTIONS = (LOOK_LEFT, LOOK_RIGHT, LOOK_UP, LOOK_DOWN)
 
 #: Animation-state names the engine always needs; the manifest (or the
@@ -94,6 +113,16 @@ REQUIRED_STATES = frozenset(
 #: have fewer reactions.
 REACTION_STATES = (HOVER, DOUBLE_CLICK, CONFUSED)
 
+#: Optional states that are *not* one-shot reactions: they are requested by
+#: another module (:mod:`peeko.avatar.expressions`) and stay in effect until
+#: they are explicitly ended. Like reactions they are switched off when the
+#: artwork does not provide their animation, so an older manifest keeps
+#: working.
+SUSTAINED_STATES = (LISTENING,)
+
+#: Every state whose animation is optional (a manifest without it still runs).
+OPTIONAL_STATES = (*REACTION_STATES, *SUSTAINED_STATES)
+
 #: Built-in state -> animation mapping (a manifest ``state_animation_map``
 #: may override any entry).
 DEFAULT_STATE_ANIMATIONS: dict[str, str] = {
@@ -108,6 +137,7 @@ DEFAULT_STATE_ANIMATIONS: dict[str, str] = {
     HOVER: HOVER,
     DOUBLE_CLICK: DOUBLE_CLICK,
     CONFUSED: CONFUSED,
+    LISTENING: LISTENING,
 }
 
 # --------------------------------------------------------------------------- #
@@ -162,17 +192,23 @@ class AvatarStateMachine:
                 + ". Add the missing animations to the asset manifest."
             )
 
-        # -- reaction states: optional, off unless the artwork provides them - #
-        reaction_map: dict[str, str] = {}
-        for state in REACTION_STATES:
+        # -- reaction/sustained states: optional, off unless the artwork has
+        #    them ---------------------------------------------------------- #
+        optional_map: dict[str, str] = {}
+        for state in OPTIONAL_STATES:
             chosen = state_map.get(state)
             if chosen in available:
-                reaction_map[state] = chosen
+                optional_map[state] = chosen
             else:
-                state_map.pop(state, None)   # reaction switched off
+                state_map.pop(state, None)   # optional state switched off
 
         self._state_map = state_map
-        self._reaction_states = frozenset(reaction_map)
+        self._reaction_states = frozenset(
+            state for state in optional_map if state in REACTION_STATES
+        )
+        self._sustained_states = frozenset(
+            state for state in optional_map if state in SUSTAINED_STATES
+        )
         self._animations: dict[str, Animation] = {
             state: self.manifest.animations[name]
             for state, name in self._state_map.items()
@@ -188,6 +224,7 @@ class AvatarStateMachine:
         self._press_active = False
         self._last_pointer_ms = -POINTER_LOOK_COOLDOWN_MS
         self._hovering = False
+        self._listening = False
 
     # ------------------------------------------------------------------ #
     # Introspection
@@ -242,6 +279,21 @@ class AvatarStateMachine:
         return state in self._reaction_states
 
     @property
+    def listening_available(self) -> bool:
+        """Can this artwork show the listening state?
+
+        Optional like the reactions: placeholder or hand-made art without a
+        ``listening`` animation simply does not show one, and everything else
+        keeps working.
+        """
+        return LISTENING in self._sustained_states
+
+    @property
+    def listening(self) -> bool:
+        """True between :meth:`start_listening` and :meth:`stop_listening`."""
+        return self._listening
+
+    @property
     def hovering(self) -> bool:
         """True between :meth:`hover_enter` and :meth:`hover_leave`."""
         return self._hovering
@@ -272,9 +324,17 @@ class AvatarStateMachine:
                 if anim.loop:
                     self._frame_index = 0
                 else:
-                    # One-shot finished: settle back to idle.
-                    self._set_state(IDLE)
+                    # One-shot finished: settle back to the resting state.
+                    self._settle()
                     return
+
+        # The listening animation is the resting state while a microphone is
+        # open, so anything that ends up back at idle resumes it (this also
+        # makes a one-shot ``listening`` animation keep playing for as long as
+        # the capture lasts).
+        if self._listening and self._state == IDLE and self.listening_available:
+            self._set_state(LISTENING, restart=True)
+            return
 
         # Only the idle state schedules spontaneous actions.
         if self._state == IDLE:
@@ -417,8 +477,8 @@ class AvatarStateMachine:
         """Can this artwork manifest play ``state``?
 
         Core states are always present (a manifest missing one fails at
-        startup); reaction states are optional and simply switched off when
-        the artwork does not provide them.
+        startup); reaction and sustained states are optional and simply
+        switched off when the artwork does not provide them.
         """
         return state in self._state_map
 
@@ -441,8 +501,53 @@ class AvatarStateMachine:
             return False
         if self._press_active or state == DRAGGING or self._state == DRAGGING:
             return False
+        if self._listening:
+            # While the microphone is open the listening animation is the
+            # user's own request, so a cue does not interrupt it.
+            return False
         self._set_state(state, restart=True)
         return True
+
+    # ------------------------------------------------------------------ #
+    # Stage 4: listening (voice input)
+    # ------------------------------------------------------------------ #
+    def start_listening(self) -> bool:
+        """Show the listening animation because a capture just started.
+
+        Stays in effect (looping, or restarted if the artwork's animation is
+        one-shot) until :meth:`stop_listening` is called — unlike a reaction
+        it does not settle back to idle on its own.
+
+        Declined when the artwork has no ``listening`` animation, and while
+        the user is holding or dragging the robot (user input always wins).
+
+        :returns: ``True`` when the state started playing.
+        """
+        if not self.listening_available:
+            return False
+        if self._press_active or self._state == DRAGGING:
+            return False
+        self._listening = True
+        self._set_state(LISTENING, restart=True)
+        return True
+
+    def stop_listening(self) -> bool:
+        """End the listening state (the capture finished or was stopped).
+
+        :returns: ``True`` when a listening animation was cut short.
+        """
+        was_listening = bool(self._listening and self._state == LISTENING)
+        self._listening = False
+        if was_listening:
+            self._set_state(IDLE)
+        return was_listening
+
+    def _settle(self) -> None:
+        """Return a finished one-shot animation to its resting state."""
+        if self._listening and self.listening_available:
+            self._set_state(LISTENING, restart=True)
+            return
+        self._set_state(IDLE)
 
     # ------------------------------------------------------------------ #
     # Internal

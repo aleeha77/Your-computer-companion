@@ -10,11 +10,12 @@ Settings are read from, in increasing priority order:
 The result is a plain ``Settings`` dataclass the rest of the app consumes.
 
 .. note::
-   Fields for features that arrive in later stages (voice input, TTS) are
-   read from the environment today so the configuration surface is stable,
-   but they have **no effect** until those stages land. The ``ai_*`` fields
-   are live as of Stage 3: they configure the chat window. Secret values are
-   never logged (see :func:`secret_env_var_names`).
+   The ``ai_*`` fields are live as of Stage 3 (they configure the chat window)
+   and the ``voice_*`` fields are live as of Stage 4 (they configure the Mic
+   button in that window). Fields for features that arrive in later stages
+   (TTS) are read from the environment today so the configuration surface is
+   stable, but they have **no effect** until those stages land. Secret values
+   are never logged (see :func:`secret_env_var_names`).
 """
 
 from __future__ import annotations
@@ -41,7 +42,12 @@ ENV_AI_MODEL = "PEEKO_AI_MODEL"
 ENV_AI_API_KEY = "PEEKO_AI_API_KEY"
 ENV_AI_BASE_URL = "PEEKO_AI_BASE_URL"
 ENV_AI_TIMEOUT_S = "PEEKO_AI_TIMEOUT_S"
+ENV_VOICE_ENABLED = "PEEKO_VOICE_ENABLED"
 ENV_VOICE_INPUT_ENGINE = "PEEKO_VOICE_INPUT_ENGINE"
+ENV_STT_MODEL = "PEEKO_STT_MODEL"
+ENV_STT_BASE_URL = "PEEKO_STT_BASE_URL"
+ENV_VOICE_TIMEOUT_S = "PEEKO_VOICE_TIMEOUT_S"
+ENV_VOICE_MAX_SECONDS = "PEEKO_VOICE_MAX_SECONDS"
 ENV_TTS_ENGINE = "PEEKO_TTS_ENGINE"
 ENV_TTS_VOICE = "PEEKO_TTS_VOICE"
 
@@ -55,6 +61,11 @@ _VALID_LOG_LEVELS = {
 
 #: Environment variables that would leak secrets if ever printed/logged.
 _SECRET_ENV_VARS = (ENV_AI_API_KEY,)
+
+#: Defaults for the voice-input settings (kept here so the settings view and
+#: the voice package can never drift apart).
+DEFAULT_VOICE_MAX_SECONDS = 30.0
+DEFAULT_VOICE_TIMEOUT_S = 60.0
 
 
 def _as_bool(value: str) -> bool:
@@ -122,8 +133,24 @@ class Settings:
     #: How long to wait for an answer before giving up, in seconds.
     ai_timeout_s: float = 30.0
 
-    # -- Stage 4: voice input (not implemented yet; config only) -----------
+    # -- Stage 4: voice input (microphone -> text) -------------------------
+    #: Master switch for the microphone. **Off** means Peeko never opens an
+    #: audio device at all; the chat window says so instead of showing a dead
+    #: button. Default on: capturing only ever starts when you click Mic.
+    voice_enabled: bool = True
+    #: Speech-to-text engine: ``openai``/``openai-compatible`` (or empty for
+    #: the default). An unknown value is reported honestly, never guessed at.
     voice_input_engine: str = ""
+    #: Transcription model, e.g. ``whisper-1`` (empty = the engine default).
+    voice_stt_model: str = ""
+    #: Speech-to-text API root; empty falls back to ``ai_base_url`` and then to
+    #: the engine's documented default, so one gateway can be set just once.
+    voice_stt_base_url: str = ""
+    #: How long to wait for a transcription before giving up, in seconds.
+    voice_timeout_s: float = DEFAULT_VOICE_TIMEOUT_S
+    #: Hard cap on a single recording, in seconds (a forgotten open
+    #: microphone stops itself).
+    voice_max_seconds: float = DEFAULT_VOICE_MAX_SECONDS
 
     # -- Stage 5: text-to-speech (not implemented yet; config only) --------
     tts_engine: str = ""
@@ -157,7 +184,16 @@ class Settings:
             "ai_base_url": self.ai_base_url or "(provider default)",
             "ai_timeout_s": self.ai_timeout_s,
             # ai_api_key intentionally omitted
-            "voice_input_engine": self.voice_input_engine,
+            "voice_enabled": self.voice_enabled,
+            "voice_input_engine": self.voice_input_engine or "(default)",
+            "voice_stt_model": self.voice_stt_model or "(engine default)",
+            "voice_stt_base_url": (
+                self.voice_stt_base_url
+                or self.ai_base_url
+                or "(engine default)"
+            ),
+            "voice_timeout_s": self.voice_timeout_s,
+            "voice_max_seconds": self.voice_max_seconds,
             "tts_engine": self.tts_engine,
             "tts_voice": self.tts_voice,
         }
@@ -203,7 +239,16 @@ def load_settings(env: Mapping[str, str] | None = None,
         ai_api_key=env.get(ENV_AI_API_KEY, ""),
         ai_base_url=env.get(ENV_AI_BASE_URL, ""),
         ai_timeout_s=_as_float(env.get(ENV_AI_TIMEOUT_S, ""), 30.0),
+        voice_enabled=_as_bool(env.get(ENV_VOICE_ENABLED, "1")),
         voice_input_engine=env.get(ENV_VOICE_INPUT_ENGINE, ""),
+        voice_stt_model=env.get(ENV_STT_MODEL, ""),
+        voice_stt_base_url=env.get(ENV_STT_BASE_URL, ""),
+        voice_timeout_s=_as_float(
+            env.get(ENV_VOICE_TIMEOUT_S, ""), DEFAULT_VOICE_TIMEOUT_S
+        ),
+        voice_max_seconds=_as_float(
+            env.get(ENV_VOICE_MAX_SECONDS, ""), DEFAULT_VOICE_MAX_SECONDS
+        ),
         tts_engine=env.get(ENV_TTS_ENGINE, ""),
         tts_voice=env.get(ENV_TTS_VOICE, ""),
     )
