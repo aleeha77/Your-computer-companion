@@ -96,7 +96,19 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         "right-click menu: Talk, Check Status, Settings, Quit (Ctrl+Q)",
         "chat window (Talk): typed conversation with the AI, and the reply "
         "drives the robot's expression",
+        "voice input (Stage 4): the Mic button listens through your "
+        "microphone and puts the words in the message box",
     ]
+    if getattr(settings, "tts_enabled", False):
+        works_today.append(
+            "voice output (Stage 5): Peeko speaks its replies out loud, and "
+            "the Speak button replays one"
+        )
+    else:
+        works_today.append(
+            "voice output (Stage 5): implemented but switched off — set "
+            "PEEKO_TTS_ENABLED=1 in .env to hear Peeko speak"
+        )
     future = [
         f"{entry.label} (Stage {entry.stage})"
         for entry in future_entries()
@@ -127,8 +139,9 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         _RULE,
         *future_lines,
         "",
-        "Voice input, TTS, memory and app awareness are not implemented yet",
-        "either — their settings exist but do nothing.",
+        "Persistent memory (Stage 8) and awareness of the app you are using",
+        "(Stage 9) are not implemented yet either — their settings exist but",
+        "do nothing.",
     ]
     return "\n".join(lines)
 
@@ -180,8 +193,9 @@ SETTINGS_NOTE = (
     "Read-only for now: these are the values Peeko is actually running with. "
     "Changing settings from the UI is not implemented yet — set them with "
     "environment variables or a .env file (see the README). The AI settings "
-    "are used by the chat window (Talk); the voice and TTS settings still "
-    "have no effect until Stages 4-5."
+    "are used by the chat window (Talk), the voice settings by the Mic button "
+    "(Stage 4) and the TTS settings by Peeko's voice and the Speak button "
+    "(Stage 5)."
 )
 
 

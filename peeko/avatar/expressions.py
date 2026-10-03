@@ -7,10 +7,13 @@ only place that knows about both worlds — maps that intent onto a state the
 current artwork manifest can actually play.
 
 The mapping is honestly approximate: the placeholder artwork has no
-dedicated talking animation, so ``talking`` uses the manifest's attentive
-``hover`` frames and ``talking_happy`` uses the happy ``click`` bounce.
-When the owner replaces the artwork (or a later stage adds real talking
-frames), only this table changes.
+dedicated *reaction* for the AI's ``talking`` intent, so that one uses the
+manifest's attentive ``hover`` frames and ``talking_happy`` uses the happy
+``click`` bounce. When the owner replaces the artwork (or a later stage adds
+better frames), only this table changes. (The AI intent named ``talking`` is
+a one-shot reaction and is *not* the same thing as the sustained ``talking``
+state Stage 5 plays while Peeko's voice is actually being heard — see
+:func:`apply_speaking`.)
 
 Rules:
 
@@ -24,6 +27,11 @@ Stage 4 (voice input) uses the same seam from the other direction: the chat
 window says "a capture started/stopped", and :func:`apply_listening` shows or
 ends the sustained ``listening`` state — the only state that does not settle
 back to idle on its own.
+
+Stage 5 (voice output) is the mirror image again: the chat window says "Peeko
+started/stopped speaking", and :func:`apply_speaking` shows or ends the
+sustained ``talking`` state. Both sustained states are optional artwork and
+both yield to the user: dragging the robot always wins.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from peeko.avatar.state_machine import (
     LOOK_LEFT,
     LOOK_RIGHT,
     LOOK_UP,
+    TALKING,
 )
 
 #: AI animation name -> avatar state. Keys must stay a subset of
@@ -69,6 +78,12 @@ FALLBACK_STATE = IDLE
 #: artwork: without a ``listening`` animation nothing is played, and the chat
 #: window's own "listening…" indicator is what tells the user.
 LISTENING_STATE = LISTENING
+
+#: What Peeko plays while its reply is being spoken out loud (Stage 5).
+#: Optional artwork in exactly the same way: without a ``talking`` animation
+#: nothing is played, and the chat window's own "Peeko is speaking…" indicator
+#: plus the Speak button are what tell the user.
+TALKING_STATE = TALKING
 
 
 def expression_state(animation: str, machine) -> str:
@@ -128,13 +143,40 @@ def apply_listening(machine, listening: bool) -> str | None:
     return IDLE if machine.stop_listening() else None
 
 
+# --------------------------------------------------------------------------- #
+# Stage 5: the voice-output talking state
+# --------------------------------------------------------------------------- #
+def talking_available(machine) -> bool:
+    """Can the current artwork show the talking animation at all?"""
+    return bool(machine.can_play(TALKING))
+
+
+def apply_speaking(machine, speaking: bool) -> str | None:
+    """Show (or end) the talking animation while Peeko speaks.
+
+    :param machine: the avatar state machine.
+    :param speaking: ``True`` when a playback started, ``False`` when it
+        finished (or failed, or was stopped).
+    :returns: the state played, or ``None`` when the machine declined — the
+        artwork has no ``talking`` animation, or the user is dragging the
+        robot right now. The chat window keeps showing its own "Peeko is
+        speaking…" indicator either way, so a decline is never a lie.
+    """
+    if speaking:
+        return TALKING if machine.start_talking() else None
+    return IDLE if machine.stop_talking() else None
+
+
 __all__ = [
     "ANIMATION_STATE_MAP",
     "FALLBACK_STATE",
     "LISTENING_STATE",
+    "TALKING_STATE",
     "apply_expression",
     "apply_listening",
+    "apply_speaking",
     "expression_state",
     "known_animations",
     "listening_available",
+    "talking_available",
 ]

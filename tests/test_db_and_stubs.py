@@ -89,12 +89,6 @@ def test_the_voice_recognizer_is_no_longer_a_stub():
 
 def test_unimplemented_subsystems_raise_honestly():
     """Future-stage interfaces must fail loudly, never fake success."""
-
-    from peeko.voice.output import SpeechSynthesizer
-
-    with pytest.raises(NotImplementedError, match="Stage 5"):
-        SpeechSynthesizer().speak("hello")
-
     from peeko.memory.store import MemoryStore
 
     store = MemoryStore(db_path=Path("/nonexistent/peeko.db"))

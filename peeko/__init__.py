@@ -7,7 +7,7 @@ the message box (nothing is sent until you press Send, so a misheard word can
 be fixed first). The whole feature lives in :mod:`peeko.voice` — microphone
 capture, the provider seam with one real engine, honest error messages and
 the Qt worker that keeps all of it off the UI thread. Listening is voice
-input only: Peeko still cannot speak (Stage 5), it cannot control your
+input only: Peeko can now speak its replies out loud (Stage 5), it cannot control your
 computer, and it never writes your audio to disk.
 
 Stage 3: AI chat. The robot can now hold a typed conversation in its own
@@ -45,5 +45,5 @@ functionality.
 
 __app_name__ = "Peeko"
 __version__ = "0.1.0"
-__stage__ = 4
+__stage__ = 5
 __total_stages__ = 13

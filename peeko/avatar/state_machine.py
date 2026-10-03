@@ -41,6 +41,16 @@ Stage 4 adds one **sustained** state for voice input:
   still open. Also optional artwork, so a manifest without it simply shows no
   listening animation (the chat window still says it is listening).
 
+Stage 5 adds the second sustained state, for voice output:
+
+* ``talking``    — a looping "mouth is moving" animation shown while Peeko's
+  reply is being played out loud. It is held by
+  :meth:`AvatarStateMachine.start_talking` exactly like ``listening``, is
+  equally optional artwork, and equally yields to a drag. When both are
+  active — you asked Peeko to speak while the microphone is still open —
+  **talking wins**: the robot shows that it is speaking, and the listening
+  pose resumes by itself the moment the playback ends.
+
 Transitions (all timers are decremented by :meth:`tick`, so nothing ever
 blocks; there are no sleeps anywhere):
 
@@ -59,7 +69,12 @@ blocks; there are no sleeps anywhere):
 * ``start_listening()``                (``idle`` -> ``listening``, held until
   ``stop_listening()``; declined while dragging or without the artwork)
 * ``stop_listening()``                 (``listening`` -> ``idle``)
-* any one-shot animation finishing    (-> ``idle``, or back to ``listening``)
+* ``start_talking()``                  (``idle`` -> ``talking``, held until
+  ``stop_talking()``; declined while dragging or without the artwork)
+* ``stop_talking()``                   (``talking`` -> ``idle``, or back to
+  ``listening`` while the microphone is still open)
+* any one-shot animation finishing    (-> ``idle``, or back to the active
+  sustained state)
 
 The machine is Qt-free so it is trivially unit-testable; the Qt widget
 simply calls :meth:`tick` from a ``QTimer`` and repaints ``frame``.
@@ -97,6 +112,11 @@ CONFUSED = "confused"
 #: stays in listening mode for as long as the microphone is open.
 LISTENING = "listening"
 
+#: "I am saying something" (voice output, Stage 5). Sustained like
+#: :data:`LISTENING`: it is held for as long as Peeko's reply is being played,
+#: and it wins over the listening pose when both are active.
+TALKING = "talking"
+
 LOOK_DIRECTIONS = (LOOK_LEFT, LOOK_RIGHT, LOOK_UP, LOOK_DOWN)
 
 #: Animation-state names the engine always needs; the manifest (or the
@@ -118,7 +138,7 @@ REACTION_STATES = (HOVER, DOUBLE_CLICK, CONFUSED)
 #: they are explicitly ended. Like reactions they are switched off when the
 #: artwork does not provide their animation, so an older manifest keeps
 #: working.
-SUSTAINED_STATES = (LISTENING,)
+SUSTAINED_STATES = (LISTENING, TALKING)
 
 #: Every state whose animation is optional (a manifest without it still runs).
 OPTIONAL_STATES = (*REACTION_STATES, *SUSTAINED_STATES)
@@ -138,6 +158,7 @@ DEFAULT_STATE_ANIMATIONS: dict[str, str] = {
     DOUBLE_CLICK: DOUBLE_CLICK,
     CONFUSED: CONFUSED,
     LISTENING: LISTENING,
+    TALKING: TALKING,
 }
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +246,7 @@ class AvatarStateMachine:
         self._last_pointer_ms = -POINTER_LOOK_COOLDOWN_MS
         self._hovering = False
         self._listening = False
+        self._talking = False
 
     # ------------------------------------------------------------------ #
     # Introspection
@@ -294,6 +316,16 @@ class AvatarStateMachine:
         return self._listening
 
     @property
+    def talking_available(self) -> bool:
+        """Can this artwork show the talking state? (Optional, like listening.)"""
+        return TALKING in self._sustained_states
+
+    @property
+    def talking(self) -> bool:
+        """True between :meth:`start_talking` and :meth:`stop_talking`."""
+        return self._talking
+
+    @property
     def hovering(self) -> bool:
         """True between :meth:`hover_enter` and :meth:`hover_leave`."""
         return self._hovering
@@ -328,12 +360,13 @@ class AvatarStateMachine:
                     self._settle()
                     return
 
-        # The listening animation is the resting state while a microphone is
-        # open, so anything that ends up back at idle resumes it (this also
-        # makes a one-shot ``listening`` animation keep playing for as long as
-        # the capture lasts).
-        if self._listening and self._state == IDLE and self.listening_available:
-            self._set_state(LISTENING, restart=True)
+        # A sustained state (listening, talking) is the resting state while it
+        # is active, so anything that ends up back at idle resumes it (this
+        # also makes a one-shot sustained animation keep playing for as long
+        # as the activity lasts).
+        sustained = self._active_sustained_state()
+        if sustained is not None and self._state == IDLE:
+            self._set_state(sustained, restart=True)
             return
 
         # Only the idle state schedules spontaneous actions.
@@ -501,34 +534,37 @@ class AvatarStateMachine:
             return False
         if self._press_active or state == DRAGGING or self._state == DRAGGING:
             return False
-        if self._listening:
-            # While the microphone is open the listening animation is the
-            # user's own request, so a cue does not interrupt it.
+        if self._listening or self._talking:
+            # While the microphone is open or Peeko is speaking, that activity
+            # is the user's own request, so a cue does not interrupt it.
             return False
         self._set_state(state, restart=True)
         return True
 
     # ------------------------------------------------------------------ #
-    # Stage 4: listening (voice input)
+    # Stage 4/5: sustained states (listening, talking)
     # ------------------------------------------------------------------ #
     def start_listening(self) -> bool:
         """Show the listening animation because a capture just started.
 
         Stays in effect (looping, or restarted if the artwork's animation is
         one-shot) until :meth:`stop_listening` is called — unlike a reaction
-        it does not settle back to idle on its own.
+        it does not settle back to idle on its own. If Peeko is talking right
+        now the talking pose stays on screen: both activities are remembered,
+        and the listening pose appears the moment the playback ends.
 
         Declined when the artwork has no ``listening`` animation, and while
         the user is holding or dragging the robot (user input always wins).
 
-        :returns: ``True`` when the state started playing.
+        :returns: ``True`` when the state was recorded.
         """
         if not self.listening_available:
             return False
         if self._press_active or self._state == DRAGGING:
             return False
         self._listening = True
-        self._set_state(LISTENING, restart=True)
+        active = self._active_sustained_state()
+        self._set_state(active or LISTENING, restart=True)
         return True
 
     def stop_listening(self) -> bool:
@@ -539,15 +575,62 @@ class AvatarStateMachine:
         was_listening = bool(self._listening and self._state == LISTENING)
         self._listening = False
         if was_listening:
-            self._set_state(IDLE)
+            self._resume_sustained()
         return was_listening
+
+    def start_talking(self) -> bool:
+        """Show the talking animation because Peeko started speaking.
+
+        Stage 5's sustained state, held exactly like ``listening``: it stays
+        until :meth:`stop_talking` is called, and it wins over the listening
+        pose while a still-open microphone is also active (the robot shows
+        what it is saying; the listening pose comes back by itself).
+
+        Declined when the artwork has no ``talking`` animation, and while the
+        user is holding or dragging the robot (user input always wins).
+
+        :returns: ``True`` when the state started playing.
+        """
+        if not self.talking_available:
+            return False
+        if self._press_active or self._state == DRAGGING:
+            return False
+        self._talking = True
+        self._set_state(TALKING, restart=True)
+        return True
+
+    def stop_talking(self) -> bool:
+        """End the talking state (the playback finished, stopped or failed).
+
+        :returns: ``True`` when a talking animation was cut short.
+        """
+        was_talking = bool(self._talking and self._state == TALKING)
+        self._talking = False
+        if was_talking:
+            self._resume_sustained()
+        return was_talking
+
+    def _active_sustained_state(self) -> str | None:
+        """The sustained state that should be playing right now, if any.
+
+        Talking beats listening: while Peeko is speaking aloud the talking
+        animation is the truthful thing to show, and a still-open microphone
+        resumes its own pose the moment the playback ends.
+        """
+        if self._talking and self.talking_available:
+            return TALKING
+        if self._listening and self.listening_available:
+            return LISTENING
+        return None
+
+    def _resume_sustained(self) -> None:
+        """Return to the active sustained state, or to :data:`IDLE`."""
+        sustained = self._active_sustained_state()
+        self._set_state(sustained or IDLE, restart=sustained is not None)
 
     def _settle(self) -> None:
         """Return a finished one-shot animation to its resting state."""
-        if self._listening and self.listening_available:
-            self._set_state(LISTENING, restart=True)
-            return
-        self._set_state(IDLE)
+        self._resume_sustained()
 
     # ------------------------------------------------------------------ #
     # Internal

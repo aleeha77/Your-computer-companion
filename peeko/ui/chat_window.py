@@ -31,16 +31,36 @@ Stage 4 adds **voice input** to the same window:
   reported in plain words, and a cancelled or empty capture says nothing at
   all — never an invented transcript.
 
+Stage 5 adds **voice output** to the same window:
+
+* Peeko speaks each reply out loud when the feature is switched on
+  (``PEEKO_TTS_ENABLED=1`` — off by default, so a fresh install is quiet), and
+  a **Speak** button replays the last reply on demand (it turns into **Stop**
+  while a playback is running);
+* synthesis and playback both run off the UI thread (see
+  :mod:`peeko.voice.worker`), so the robot never freezes waiting for audio;
+* a visible **"Peeko is speaking…"** state, plus a
+  :attr:`ChatWindow.speakingChanged` signal the avatar turns into its
+  sustained talking animation;
+* every speaking failure (voice switched off, no key, no audio output device,
+  no audio library, a bad voice name, a service error, a timeout, unplayable
+  audio) is reported in plain words, and a stopped playback says nothing at
+  all;
+* with the feature switched off there is **no Speak button at all** and the
+  hint line says exactly which variable turns it on — never a dead control.
+
 The window owns no AI or voice logic of its own: prompts, validation and the
-controlled vocabulary live in :mod:`peeko.ai`; capture, transcription and
-their failure modes live in :mod:`peeko.voice`. Here we only talk to
-:class:`peeko.ai.client.AIClient` and
-:class:`peeko.voice.input.SpeechRecognizer`, which is why the whole chat path
-can be tested with a fake provider and a fake microphone and no network.
+controlled vocabulary live in :mod:`peeko.ai`; capture, transcription,
+synthesis, playback and their failure modes live in :mod:`peeko.voice`. Here
+we only talk to :class:`peeko.ai.client.AIClient`,
+:class:`peeko.voice.input.SpeechRecognizer` and
+:class:`peeko.voice.output.SpeechSynthesizer`, which is why the whole chat path
+can be tested with a fake provider, a fake microphone and a fake player — and
+no network at all.
 
 Nothing in this module executes anything an AI reply says. An answer can
-change exactly two things: the text shown here and which allowed animation
-the robot plays.
+change exactly three things: the text shown here, which allowed animation the
+robot plays, and whether that text is read aloud.
 """
 
 from __future__ import annotations
@@ -70,7 +90,14 @@ from peeko.ai.worker import AIWorkerSignals, submit_reply
 from peeko.ui.context_menu import TALK_ID
 from peeko.voice.errors import VoiceError
 from peeko.voice.input import SpeechRecognizer
-from peeko.voice.worker import VoiceWorkerSignals, submit_capture
+from peeko.voice.output import DISABLED_TEXT as TTS_DISABLED_TEXT
+from peeko.voice.output import SpeechSynthesizer
+from peeko.voice.worker import (
+    SpeechWorkerSignals,
+    VoiceWorkerSignals,
+    submit_capture,
+)
+from peeko.voice.worker import submit_speech as submit_speech_worker
 
 LOG = logging.getLogger("peeko.ui")
 
@@ -80,9 +107,16 @@ THINKING_TEXT = "Peeko is thinking…"
 #: Shown while the microphone is open.
 LISTENING_TEXT = "Listening… speak now, then click Stop (or press Mic again)."
 
+#: Shown while Peeko's reply is being played out loud.
+SPEAKING_TEXT = "Peeko is speaking… click Stop to cut it short."
+
 #: Button labels for the Mic control.
 MIC_LABEL = "Mic"
 MIC_STOP_LABEL = "Stop"
+
+#: Button labels for the Speak control.
+SPEAK_LABEL = "Speak"
+SPEAK_STOP_LABEL = "Stop"
 
 #: Tooltips for the Mic control (honest about what a click will do).
 MIC_TOOLTIP = (
@@ -100,6 +134,29 @@ MIC_DISABLED_TOOLTIP = (
 VOICE_DISABLED_TEXT = (
     "Voice input is switched off. Set PEEKO_VOICE_ENABLED=1 in .env (next to "
     "the app) and restart Peeko to use the microphone."
+)
+
+#: Tooltips for the Speak control (honest about what a click will do).
+SPEAK_TOOLTIP = (
+    "Peeko's voice: click to speak the last reply out loud through your "
+    "speakers. Click again (or Stop) to cut it short."
+)
+
+#: Shown when the user asks Peeko to speak before there is anything to say.
+NOTHING_TO_SPEAK_TEXT = (
+    "There is nothing to speak yet — send Peeko a message first, or pick a "
+    "reply from the transcript."
+)
+
+#: The hint line's account of the voice-output setting, on and off. TTS is off
+#: by default, so the off-wording is what a fresh install shows.
+SPEAK_ENABLED_HINT = (
+    "Peeko speaks its replies out loud (Stage 5) — press Speak to hear one "
+    "again, or Stop to cut it short."
+)
+SPEAK_DISABLED_HINT = (
+    "Peeko's voice is switched off — set PEEKO_TTS_ENABLED=1 in .env to have "
+    "it speak its replies out loud (Stage 5)."
 )
 
 #: Shown when a request failed for a reason nobody could describe better.
@@ -202,6 +259,14 @@ class ChatWindow(QWidget):
     :param submit_voice: the function that runs one capture off the UI thread.
         Defaults to :func:`peeko.voice.worker.submit_capture`; tests inject a
         synchronous double so no thread (and no real microphone) is involved.
+    :param synthesizer: a :class:`peeko.voice.output.SpeechSynthesizer` to use
+        for voice output. When omitted, one is built from ``settings`` every
+        time Peeko is asked to speak, so editing ``.env`` and pressing Speak
+        again picks the new configuration up.
+    :param submit_speech: the function that runs one utterance off the UI
+        thread. Defaults to :func:`peeko.voice.worker.submit_speech`; tests
+        inject a synchronous double so no thread (and no real speaker) is
+        involved.
     :param parent: usually the avatar window, which owns this window.
 
     Signals:
@@ -211,10 +276,14 @@ class ChatWindow(QWidget):
         listeningChanged: ``True`` when a voice capture starts, ``False`` when
             it ends (for any reason). The avatar window turns that into its
             listening animation.
+        speakingChanged: ``True`` when a playback of Peeko's reply starts,
+            ``False`` when it ends (finished, stopped or failed). The avatar
+            window turns that into its talking animation.
     """
 
     expressionRequested = Signal(str)
     listeningChanged = Signal(bool)
+    speakingChanged = Signal(bool)
 
     def __init__(self, settings, client: AIClient | None = None, *,
                  context_provider: Callable[[], ChatContext | None] | None = None,
@@ -222,6 +291,8 @@ class ChatWindow(QWidget):
                  submit: Callable[..., object] | None = None,
                  recognizer: SpeechRecognizer | None = None,
                  submit_voice: Callable[..., object] | None = None,
+                 synthesizer: SpeechSynthesizer | None = None,
+                 submit_speech: Callable[..., object] | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
@@ -233,6 +304,9 @@ class ChatWindow(QWidget):
         self._injected_recognizer = recognizer is not None
         self._recognizer = recognizer
         self._submit_voice = submit_voice or submit_capture
+        self._injected_synthesizer = synthesizer is not None
+        self._synthesizer = synthesizer
+        self._submit_speech = submit_speech or submit_speech_worker
 
         self._entries: list[ChatEntry] = []
         self._history: list[dict[str, str]] = []
@@ -242,6 +316,9 @@ class ChatWindow(QWidget):
         self._listening = False
         self._voice_task: object | None = None
         self._voice_cancel_requested = False
+        self._speaking = False
+        self._speech_task: object | None = None
+        self._speech_cancel_requested = False
 
         # One signal emitter for the whole window, owned by the UI thread:
         # the worker emits from its own thread and Qt delivers the slots here.
@@ -254,6 +331,12 @@ class ChatWindow(QWidget):
         self._voice_signals.empty.connect(self._on_voice_empty)
         self._voice_signals.cancelled.connect(self._on_voice_cancelled)
         self._voice_signals.failed.connect(self._on_voice_failed)
+
+        self._speech_signals = SpeechWorkerSignals()
+        self._speech_signals.finished.connect(self._on_spoken)
+        self._speech_signals.empty.connect(self._on_speech_empty)
+        self._speech_signals.cancelled.connect(self._on_speech_cancelled)
+        self._speech_signals.failed.connect(self._on_speech_failed)
 
         self._build_ui()
         self.refresh_configuration()
@@ -309,6 +392,12 @@ class ChatWindow(QWidget):
         self._mic_button.clicked.connect(self._on_mic_clicked)
         row.addWidget(self._mic_button)
 
+        self._speak_button = QPushButton(SPEAK_LABEL)
+        self._speak_button.setObjectName("chat_speak")
+        self._speak_button.setToolTip(SPEAK_TOOLTIP)
+        self._speak_button.clicked.connect(self._on_speak_clicked)
+        row.addWidget(self._speak_button)
+
         self._send_button = QPushButton("Send")
         self._send_button.setObjectName("chat_send")
         self._send_button.setToolTip("Send your message (or just press Enter).")
@@ -316,13 +405,7 @@ class ChatWindow(QWidget):
         row.addWidget(self._send_button)
         layout.addLayout(row)
 
-        self._hint = QLabel(
-            f"Enter sends · Esc closes this window · the robot keeps floating. "
-            f"Mic listens through your microphone (Stage 4) and puts the words "
-            f"in the message box — nothing is sent until you press Send. "
-            f"Stage {__stage__} of {__total_stages__} — Peeko cannot control "
-            f"your computer; it can only chat and play an expression."
-        )
+        self._hint = QLabel(self._build_hint())
         self._hint.setObjectName("chat_hint")
         self._hint.setWordWrap(True)
         self._hint.setStyleSheet("color: palette(mid);")
@@ -352,6 +435,7 @@ class ChatWindow(QWidget):
         self._banner.setText(banner)
         self._banner.setVisible(bool(banner))
         self._refresh_mic_button()
+        self._refresh_speak_button()
         LOG.info("Chat window configuration: %s", self._client.describe())
         return not banner
 
@@ -366,6 +450,33 @@ class ChatWindow(QWidget):
             MIC_ENABLED_TOOLTIP if enabled else MIC_DISABLED_TOOLTIP
         )
 
+    def _build_hint(self) -> str:
+        """The hint line, honest about which voice features are switched on."""
+        parts = [
+            "Enter sends · Esc closes this window · the robot keeps floating.",
+            "Mic listens through your microphone (Stage 4) and puts the words "
+            "in the message box — nothing is sent until you press Send.",
+            SPEAK_ENABLED_HINT if self.tts_enabled() else SPEAK_DISABLED_HINT,
+            f"Stage {__stage__} of {__total_stages__} — Peeko cannot control "
+            f"your computer; it can only chat, speak and play an expression.",
+        ]
+        return " ".join(parts)
+
+    def _refresh_speak_button(self) -> None:
+        """Reflect the voice-output setting on the Speak button.
+
+        Unlike the Mic — which always has a job (it can explain itself) — the
+        Speak button only exists when there is a voice to use, so it is
+        *hidden* while ``PEEKO_TTS_ENABLED`` is off. The hint line underneath
+        then says exactly which variable turns Peeko's voice on, so the
+        feature is never silently missing.
+        """
+        enabled = self.tts_enabled()
+        self._speak_button.setVisible(enabled)
+        self._speak_button.setEnabled(enabled)
+        self._speak_button.setToolTip(SPEAK_TOOLTIP)
+        self._hint.setText(self._build_hint())
+
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         """Refresh the configuration each time the window comes up."""
         super().showEvent(event)
@@ -373,10 +484,13 @@ class ChatWindow(QWidget):
         self._input.setFocus()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """Never leave the microphone (or the robot's ears) open behind us."""
+        """Never leave the microphone (or Peeko's voice) running behind us."""
         if self._listening:
             LOG.info("Chat window closed while listening — stopping the mic.")
             self.stop_listening()
+        if self._speaking:
+            LOG.info("Chat window closed while speaking — stopping playback.")
+            self.stop_speaking()
         super().closeEvent(event)
 
     @property
@@ -469,12 +583,15 @@ class ChatWindow(QWidget):
     def _refresh_status(self) -> None:
         """Show the one thing the user most needs to know right now.
 
-        Priority: a request in flight, then an open microphone, then any note
-        about the last reply. Keeping this in one place means the listening
-        indicator can never be wiped by a reply that arrives mid-capture.
+        Priority: a request in flight, then a playback, then an open
+        microphone, then any note about the last reply. Keeping this in one
+        place means one indicator can never be wiped by another activity
+        starting or finishing underneath it.
         """
         if self._thinking:
             text = THINKING_TEXT
+        elif self._speaking:
+            text = SPEAKING_TEXT
         elif self._listening:
             text = LISTENING_TEXT
         else:
@@ -729,6 +846,11 @@ class ChatWindow(QWidget):
         self.expressionRequested.emit(reply.animation)
         LOG.info("Chat reply shown (emotion=%s animation=%s).",
                  reply.emotion, reply.animation)
+        if self.tts_enabled():
+            # Stage 5: say it out loud, off the UI thread. A failure here
+            # never touches the reply that was just shown — it only adds an
+            # honest note about the voice.
+            self.speak(reply.response)
 
     def _on_failed(self, message: str) -> None:
         """A request failed: say so in the user's own words, never invent one."""
@@ -776,6 +898,189 @@ class ChatWindow(QWidget):
         LOG.warning("Voice input failed: %s", text)
 
     # ------------------------------------------------------------------ #
+    # Voice output (Stage 5): Peeko speaks its replies
+    # ------------------------------------------------------------------ #
+    def is_speaking(self) -> bool:
+        """True while Peeko's reply is being played out loud."""
+        return self._speaking
+
+    def speak_text(self) -> str:
+        """The Speak button's label (``"Speak"``, or ``"Stop"`` while playing)."""
+        return self._speak_button.text()
+
+    def tts_enabled(self) -> bool:
+        """Whether the settings allow Peeko to speak at all."""
+        return bool(getattr(self._settings, "tts_enabled", False))
+
+    def synthesizer(self) -> SpeechSynthesizer:
+        """The synthesizer speaking will use.
+
+        An injected one is reused; otherwise a fresh one is built from the
+        current settings every time, so a ``.env`` edit is picked up by the
+        next click (exactly like the AI client and the recognizer).
+        """
+        if self._injected_synthesizer and self._synthesizer is not None:
+            return self._synthesizer
+        self._synthesizer = SpeechSynthesizer.from_settings(self._settings)
+        return self._synthesizer
+
+    def speak_problem(self) -> str:
+        """Why Peeko cannot speak right now (``""`` when it can)."""
+        if not self.tts_enabled():
+            return TTS_DISABLED_TEXT
+        try:
+            return self.synthesizer().availability_problem()
+        except Exception as exc:  # noqa: BLE001 - never a crash from a check
+            LOG.exception("Could not check the speech configuration")
+            return (
+                "Peeko cannot speak: the voice could not be checked "
+                f"({exc})."
+            )
+
+    def last_reply_text(self) -> str:
+        """The text of Peeko's most recent reply (``""`` when there is none)."""
+        for entry in reversed(self._entries):
+            if entry.role == ROLE_PEEKO:
+                return entry.text
+        return ""
+
+    def _on_speak_clicked(self) -> None:
+        """The Speak button: stop when playing, otherwise (re)play a reply."""
+        if self._speaking:
+            self.stop_speaking()
+        else:
+            self.speak()
+
+    def speak(self, text: str | None = None) -> bool:
+        """Speak Peeko's last reply (or ``text``) out loud.
+
+        Synthesis and playback run off the UI thread, so nothing here blocks.
+
+        :param text: what to say; defaults to Peeko's most recent reply.
+        :returns: True when a playback was actually started. ``False`` means
+            nothing was played — and the reason is always said out loud in
+            the transcript: no reply yet, the voice switched off, a missing
+            key, no audio output device, or a broken worker. Nothing is ever
+            faked as "spoken".
+        """
+        if self._speaking:
+            LOG.debug("Peeko is already speaking — ignoring the request.")
+            return False
+
+        spoken = (self.last_reply_text() if text is None else text) or ""
+        spoken = spoken.strip()
+        if not spoken:
+            LOG.debug("Nothing to speak yet.")
+            self._append_notice(NOTHING_TO_SPEAK_TEXT, error=True)
+            return False
+
+        if not self.tts_enabled():
+            LOG.warning("Speaking is switched off (PEEKO_TTS_ENABLED=0).")
+            self._append_notice(TTS_DISABLED_TEXT, error=True)
+            return False
+
+        try:
+            synthesizer = self.synthesizer()
+        except VoiceError as exc:
+            LOG.warning("The voice is misconfigured: %s", exc.message)
+            self._append_notice(exc.message, error=True)
+            return False
+        except Exception:  # noqa: BLE001 - never a crash from configuration
+            LOG.exception("Could not build the speech synthesizer")
+            self._append_notice(FAILED_TEXT, error=True)
+            return False
+
+        # Checked *before* the service is called: with no key (or no audio
+        # output) Peeko never sends the reply anywhere, and nothing is played.
+        problem = synthesizer.availability_problem()
+        if problem:
+            LOG.warning("Peeko cannot speak: %s", problem)
+            self._append_notice(problem, error=True)
+            return False
+
+        self._speech_cancel_requested = False
+        try:
+            task = self._submit_speech(
+                synthesizer, spoken, signals=self._speech_signals,
+            )
+        except Exception:  # noqa: BLE001 - a broken submit must not crash
+            LOG.exception("Could not start the speech playback")
+            self._append_notice(FAILED_TEXT, error=True)
+            return False
+
+        self._speech_task = task
+        self._record(f"user asked Peeko to speak ({len(spoken)} characters)")
+        LOG.info("Speech playback started: %s", synthesizer.describe())
+        self._set_speaking(True)
+        return True
+
+    def stop_speaking(self, *, cancelled: bool = True) -> bool:
+        """Stop the playback in progress.
+
+        :param cancelled: True when the user asked to stop (the worker reports
+            a cancellation and nothing is shown); False for the internal
+            teardown when the playback already finished.
+        :returns: True when a playback was running.
+        """
+        if not self._speaking:
+            return False
+        self._speech_cancel_requested = bool(cancelled)
+        task = self._speech_task
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - cancelling is best-effort
+                LOG.debug("Could not cancel the speech playback",
+                          exc_info=True)
+        self._record("user stopped Peeko speaking")
+        LOG.info("Speech playback stopped by the user.")
+        self._set_speaking(False)
+        return True
+
+    def _set_speaking(self, speaking: bool) -> None:
+        """Enter/leave the speaking state and tell the avatar about it."""
+        speaking = bool(speaking)
+        was = self._speaking
+        self._speaking = speaking
+        if not speaking:
+            self._speech_task = None
+        self._speak_button.setText(
+            SPEAK_STOP_LABEL if speaking else SPEAK_LABEL
+        )
+        self._speak_button.setToolTip(
+            "Stop speaking and stay quiet." if speaking else SPEAK_TOOLTIP
+        )
+        self._refresh_status()
+        if was != speaking:
+            self.speakingChanged.emit(speaking)
+
+    # ------------------------------------------------------------------ #
+    # Speech results (delivered on the UI thread by the worker's signals)
+    # ------------------------------------------------------------------ #
+    def _on_spoken(self) -> None:
+        """The playback finished — back to being quiet."""
+        self._set_speaking(False)
+        LOG.info("Peeko finished speaking.")
+
+    def _on_speech_empty(self) -> None:
+        """There was nothing to say, or no audio came back: quietly ignore."""
+        self._set_speaking(False)
+        LOG.info("Speech produced no audio — nothing was shown.")
+
+    def _on_speech_cancelled(self) -> None:
+        """The user stopped the playback — nothing to report."""
+        self._set_speaking(False)
+        LOG.info("Speech playback cancelled — nothing shown.")
+
+    def _on_speech_failed(self, message: str) -> None:
+        """A speaking problem: report it in plain words, never pretend."""
+        self._set_speaking(False)
+        text = (message or "").strip() or FAILED_TEXT
+        self._append_notice(text, error=True)
+        LOG.warning("Speaking failed: %s", text)
+
+    # ------------------------------------------------------------------ #
     # History (sent back to the AI with the next message)
     # ------------------------------------------------------------------ #
     def history(self) -> tuple[dict[str, str], ...]:
@@ -795,12 +1100,15 @@ def build_chat_window(settings, client: AIClient | None = None, *,
                       submit: Callable[..., object] | None = None,
                       recognizer: SpeechRecognizer | None = None,
                       submit_voice: Callable[..., object] | None = None,
+                      synthesizer: SpeechSynthesizer | None = None,
+                      submit_speech: Callable[..., object] | None = None,
                       parent: QWidget | None = None) -> ChatWindow:
     """Build (but do not show) the chat window."""
     return ChatWindow(
         settings, client, context_provider=context_provider,
         interactions=interactions, submit=submit, recognizer=recognizer,
-        submit_voice=submit_voice, parent=parent,
+        submit_voice=submit_voice, synthesizer=synthesizer,
+        submit_speech=submit_speech, parent=parent,
     )
 
 
@@ -810,12 +1118,15 @@ def show_chat_window(settings, client: AIClient | None = None, *,
                      submit: Callable[..., object] | None = None,
                      recognizer: SpeechRecognizer | None = None,
                      submit_voice: Callable[..., object] | None = None,
+                     synthesizer: SpeechSynthesizer | None = None,
+                     submit_speech: Callable[..., object] | None = None,
                      parent: QWidget | None = None) -> ChatWindow:
     """Build, show and focus the chat window (non-blocking)."""
     window = build_chat_window(
         settings, client, context_provider=context_provider,
         interactions=interactions, submit=submit, recognizer=recognizer,
-        submit_voice=submit_voice, parent=parent,
+        submit_voice=submit_voice, synthesizer=synthesizer,
+        submit_speech=submit_speech, parent=parent,
     )
     window.show()
     window.raise_()
@@ -837,10 +1148,17 @@ __all__ = [
     "MIC_LABEL",
     "MIC_STOP_LABEL",
     "MIC_TOOLTIP",
+    "NOTHING_TO_SPEAK_TEXT",
     "ROLE_NOTICE",
     "ROLE_PEEKO",
     "ROLE_USER",
     "SPEAKER_LABELS",
+    "SPEAKING_TEXT",
+    "SPEAK_DISABLED_HINT",
+    "SPEAK_ENABLED_HINT",
+    "SPEAK_LABEL",
+    "SPEAK_STOP_LABEL",
+    "SPEAK_TOOLTIP",
     "THINKING_TEXT",
     "VOICE_DISABLED_TEXT",
     "build_banner_text",

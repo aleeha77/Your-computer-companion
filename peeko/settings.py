@@ -10,12 +10,14 @@ Settings are read from, in increasing priority order:
 The result is a plain ``Settings`` dataclass the rest of the app consumes.
 
 .. note::
-   The ``ai_*`` fields are live as of Stage 3 (they configure the chat window)
-   and the ``voice_*`` fields are live as of Stage 4 (they configure the Mic
-   button in that window). Fields for features that arrive in later stages
-   (TTS) are read from the environment today so the configuration surface is
-   stable, but they have **no effect** until those stages land. Secret values
-   are never logged (see :func:`secret_env_var_names`).
+   The ``ai_*`` fields are live as of Stage 3 (they configure the chat window),
+   the ``voice_*`` fields are live as of Stage 4 (they configure the Mic
+   button in that window) and the ``tts_*`` fields are live as of Stage 5
+   (they configure Peeko's voice and the Speak button). Fields for features
+   that arrive in later stages (memory, awareness) are read from the
+   environment today so the configuration surface is stable, but they have
+   **no effect** until those stages land. Secret values are never logged (see
+   :func:`secret_env_var_names`).
 """
 
 from __future__ import annotations
@@ -48,8 +50,14 @@ ENV_STT_MODEL = "PEEKO_STT_MODEL"
 ENV_STT_BASE_URL = "PEEKO_STT_BASE_URL"
 ENV_VOICE_TIMEOUT_S = "PEEKO_VOICE_TIMEOUT_S"
 ENV_VOICE_MAX_SECONDS = "PEEKO_VOICE_MAX_SECONDS"
+ENV_TTS_ENABLED = "PEEKO_TTS_ENABLED"
 ENV_TTS_ENGINE = "PEEKO_TTS_ENGINE"
 ENV_TTS_VOICE = "PEEKO_TTS_VOICE"
+ENV_TTS_VOLUME = "PEEKO_TTS_VOLUME"
+ENV_TTS_SPEED = "PEEKO_TTS_SPEED"
+ENV_TTS_MODEL = "PEEKO_TTS_MODEL"
+ENV_TTS_BASE_URL = "PEEKO_TTS_BASE_URL"
+ENV_TTS_TIMEOUT_S = "PEEKO_TTS_TIMEOUT_S"
 
 _VALID_LOG_LEVELS = {
     "CRITICAL": logging.CRITICAL,
@@ -66,6 +74,14 @@ _SECRET_ENV_VARS = (ENV_AI_API_KEY,)
 #: the voice package can never drift apart).
 DEFAULT_VOICE_MAX_SECONDS = 30.0
 DEFAULT_VOICE_TIMEOUT_S = 60.0
+
+#: Defaults for the text-to-speech settings (same rule: one source of truth —
+#: :data:`peeko.voice.output_providers.DEFAULT_SPEED` and friends are the same
+#: numbers). The model and voice defaults live in the provider, because an
+#: unset value means "the engine decides".
+DEFAULT_TTS_SPEED = 1.0
+DEFAULT_TTS_VOLUME = 1.0
+DEFAULT_TTS_TIMEOUT_S = 60.0
 
 
 def _as_bool(value: str) -> bool:
@@ -90,6 +106,19 @@ def _as_float(value: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _as_unit_float(value: str, default: float) -> float:
+    """Parse a ``0.0 .. 1.0`` setting (a volume), clamping what is out of range.
+
+    Unlike :func:`_as_float`, zero is a *meaningful* value here — it means
+    "silent" — so only an unreadable value falls back to the default.
+    """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, parsed))
 
 
 @dataclass(frozen=True)
@@ -152,9 +181,28 @@ class Settings:
     #: microphone stops itself).
     voice_max_seconds: float = DEFAULT_VOICE_MAX_SECONDS
 
-    # -- Stage 5: text-to-speech (not implemented yet; config only) --------
+    # -- Stage 5: text-to-speech (Peeko speaks its replies) ----------------
+    #: Master switch for Peeko's voice. **Off by default**, deliberately:
+    #: speaking costs an API call and opens an audio device, so Peeko only
+    #: talks once the owner asks for it (``PEEKO_TTS_ENABLED=1``). While it is
+    #: off the chat window shows no Speak button and says why.
+    tts_enabled: bool = False
+    #: Speech engine: ``openai``/``openai-compatible`` (or empty for the
+    #: default). An unknown value is reported honestly, never guessed at.
     tts_engine: str = ""
+    #: Voice name, e.g. ``alloy`` (empty = the engine's documented default).
     tts_voice: str = ""
+    #: Speech model, e.g. ``tts-1`` (empty = the engine default).
+    tts_model: str = ""
+    #: Speaking rate in the *request* (1.0 = normal, 0.25–4.0 at OpenAI).
+    tts_speed: float = DEFAULT_TTS_SPEED
+    #: Playback level applied locally, ``0.0 .. 1.0`` (``0`` = silent).
+    tts_volume: float = DEFAULT_TTS_VOLUME
+    #: Text-to-speech API root; empty falls back to ``ai_base_url`` and then to
+    #: the engine's documented default, so one gateway can be set just once.
+    tts_base_url: str = ""
+    #: How long to wait for a synthesis before giving up, in seconds.
+    tts_timeout_s: float = DEFAULT_TTS_TIMEOUT_S
 
     # ------------------------------------------------------------------
     def log_level_int(self) -> int:
@@ -194,8 +242,18 @@ class Settings:
             ),
             "voice_timeout_s": self.voice_timeout_s,
             "voice_max_seconds": self.voice_max_seconds,
-            "tts_engine": self.tts_engine,
-            "tts_voice": self.tts_voice,
+            "tts_enabled": self.tts_enabled,
+            "tts_engine": self.tts_engine or "(default)",
+            "tts_voice": self.tts_voice or "(engine default)",
+            "tts_model": self.tts_model or "(engine default)",
+            "tts_speed": self.tts_speed,
+            "tts_volume": self.tts_volume,
+            "tts_base_url": (
+                self.tts_base_url
+                or self.ai_base_url
+                or "(engine default)"
+            ),
+            "tts_timeout_s": self.tts_timeout_s,
         }
         return base
 
@@ -249,8 +307,18 @@ def load_settings(env: Mapping[str, str] | None = None,
         voice_max_seconds=_as_float(
             env.get(ENV_VOICE_MAX_SECONDS, ""), DEFAULT_VOICE_MAX_SECONDS
         ),
+        tts_enabled=_as_bool(env.get(ENV_TTS_ENABLED, "0")),
         tts_engine=env.get(ENV_TTS_ENGINE, ""),
         tts_voice=env.get(ENV_TTS_VOICE, ""),
+        tts_model=env.get(ENV_TTS_MODEL, ""),
+        tts_speed=_as_float(env.get(ENV_TTS_SPEED, ""), DEFAULT_TTS_SPEED),
+        tts_volume=_as_unit_float(
+            env.get(ENV_TTS_VOLUME, ""), DEFAULT_TTS_VOLUME
+        ),
+        tts_base_url=env.get(ENV_TTS_BASE_URL, ""),
+        tts_timeout_s=_as_float(
+            env.get(ENV_TTS_TIMEOUT_S, ""), DEFAULT_TTS_TIMEOUT_S
+        ),
     )
 
 

@@ -59,6 +59,16 @@ window a microphone:
   and animates on a machine with no microphone and no audio library — and
   user input still wins: the listening pose is declined while the robot is
   being dragged.
+
+Stage 5 adds the matching **talking** behaviour, again without this window
+owning any audio: the chat window speaks Peeko's reply off the UI thread and
+tells this window through
+:attr:`peeko.ui.chat_window.ChatWindow.speakingChanged`, which is connected to
+:meth:`AvatarWindow.play_speaking` and
+:func:`peeko.avatar.expressions.apply_speaking`. It is optional artwork too,
+yields to a drag, and — when a capture is still open — talking wins while the
+playback lasts, exactly as the state machine documents. This window still
+never opens an audio device or a network connection.
 """
 
 from __future__ import annotations
@@ -78,7 +88,11 @@ from PySide6.QtWidgets import QWidget
 
 from peeko.ai.context import InteractionLog, build_context
 from peeko.avatar.assets import AssetLibrary
-from peeko.avatar.expressions import apply_expression, apply_listening
+from peeko.avatar.expressions import (
+    apply_expression,
+    apply_listening,
+    apply_speaking,
+)
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.renderer import draw_frame
 from peeko.avatar.state_machine import IDLE, AvatarStateMachine
@@ -368,6 +382,9 @@ class AvatarWindow(QWidget):
             # Stage 4: the chat window owns the microphone; the robot only
             # shows what it is doing ("listening…").
             self._chat_window.listeningChanged.connect(self.play_listening)
+            # Stage 5: the chat window owns playback too; the robot only shows
+            # that it is speaking.
+            self._chat_window.speakingChanged.connect(self.play_speaking)
             LOG.info("Chat window created.")
         self._interactions.record("user opened the chat window")
         self._chat_window.show()
@@ -418,6 +435,24 @@ class AvatarWindow(QWidget):
         played = apply_listening(self._machine, bool(listening))
         LOG.info("Voice %s -> avatar state %r",
                  "listening" if listening else "stopped listening", played)
+        return played
+
+    def play_speaking(self, speaking: bool) -> str | None:
+        """Show or end the talking animation while Peeko's reply is played.
+
+        Stage 5: the chat window synthesizes and plays the reply on a worker
+        thread and tells this window through
+        :attr:`peeko.ui.chat_window.ChatWindow.speakingChanged`. Like the
+        listening pose this animation is optional artwork, and like every
+        other cue it is declined while the user is dragging the robot — the
+        chat window's own "Peeko is speaking…" indicator is what keeps the
+        report truthful either way.
+
+        :returns: the avatar state played, or ``None`` when nothing changed.
+        """
+        played = apply_speaking(self._machine, bool(speaking))
+        LOG.info("Speech %s -> avatar state %r",
+                 "started" if speaking else "finished", played)
         return played
 
     def _show_settings(self) -> None:

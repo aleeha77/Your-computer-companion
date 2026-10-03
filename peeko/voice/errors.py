@@ -1,4 +1,4 @@
-"""Errors raised by the voice subsystem (Stage 4: voice input).
+"""Errors raised by the voice subsystem (Stage 4 in, Stage 5 out).
 
 Like :mod:`peeko.ai.errors`, every message here is written to be shown to
 the user **as-is**: it names what went wrong and what to do about it, and it
@@ -21,11 +21,16 @@ class VoiceError(PeekoError):
 
 
 class VoiceConfigError(VoiceError):
-    """Voice input cannot run yet: missing or unsupported configuration."""
+    """Voice cannot run yet: missing or unsupported configuration."""
 
 
 class VoiceUnavailableError(VoiceError):
-    """Voice input cannot run on this machine (no audio library/microphone)."""
+    """Audio cannot be used on this machine (no audio library or no device).
+
+    Used by both halves of the feature: a machine with no microphone cannot
+    *listen* (:mod:`peeko.voice.audio`) and one with no speakers — or without
+    the optional audio library — cannot *speak* (:mod:`peeko.voice.player`).
+    """
 
 
 class VoicePermissionError(VoiceUnavailableError):
@@ -48,6 +53,26 @@ class STTResponseError(VoiceError):
     """The service answered with something Peeko cannot use."""
 
 
+class TTSProviderError(VoiceError):
+    """The text-to-speech service could not be reached, or answered badly."""
+
+
+class TTSTimeoutError(TTSProviderError):
+    """The text-to-speech service did not answer within the timeout."""
+
+
+class TTSResponseError(VoiceError):
+    """The service sent audio (or a reply) Peeko cannot play.
+
+    A different kind of problem from a service error: the request worked, but
+    what came back is not audio Peeko can hand to the speakers.
+    """
+
+
+class TTSPlaybackError(VoiceError):
+    """The speech was synthesised but could not be played on this machine."""
+
+
 def redact(message: str, secret: str | None) -> str:
     """Replace ``secret`` with ``[REDACTED]`` in a user-facing message.
 
@@ -64,6 +89,10 @@ __all__ = [
     "STTProviderError",
     "STTResponseError",
     "STTTimeoutError",
+    "TTSPlaybackError",
+    "TTSProviderError",
+    "TTSResponseError",
+    "TTSTimeoutError",
     "VoiceCaptureError",
     "VoiceConfigError",
     "VoiceError",
