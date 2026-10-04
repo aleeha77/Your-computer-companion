@@ -18,9 +18,11 @@ from peeko.avatar.expressions import (
     FALLBACK_STATE,
     apply_expression,
     apply_listening,
+    apply_speaking,
     expression_state,
     known_animations,
     listening_available,
+    talking_available,
 )
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.state_machine import (
@@ -31,6 +33,7 @@ from peeko.avatar.state_machine import (
     HOVER,
     IDLE,
     LISTENING,
+    TALKING,
     AvatarStateMachine,
 )
 from peeko.avatar.widget import DEFAULT_ASSETS_DIR
@@ -182,3 +185,62 @@ def test_the_listening_pose_yields_to_a_drag():
     assert apply_listening(machine, True) is None     # declined while dragging
     assert machine.state == DRAGGING
     assert apply_listening(machine, False) is None    # no pose to end
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: the sustained talking state (voice output)
+# --------------------------------------------------------------------------- #
+def test_apply_speaking_shows_and_ends_the_pose():
+    machine = machine_for(PACKAGED_MANIFEST)
+
+    assert apply_speaking(machine, True) == TALKING
+    assert machine.state == TALKING
+    assert machine.talking is True
+    assert apply_speaking(machine, False) == IDLE
+    assert machine.state == IDLE
+    assert apply_speaking(machine, False) is None     # nothing left to end
+
+
+def test_the_packaged_artwork_ships_the_talking_animation():
+    machine = machine_for(PACKAGED_MANIFEST)
+    assert talking_available(machine) is True
+    assert machine.can_play(TALKING) is True
+    assert machine.talking_available is True
+
+
+def test_a_manifest_without_the_talking_animation_declines_and_says_nothing(
+    tmp_path, manifest_data
+):
+    """Older artwork keeps working: no pose, and the window still says so."""
+    manifest_data["animations"].pop("talking", None)
+    machine = machine_for(write_avatar_assets(tmp_path / "art", manifest_data))
+
+    assert talking_available(machine) is False
+    assert apply_speaking(machine, True) is None
+    assert apply_speaking(machine, False) is None
+    assert machine.state == IDLE
+
+
+def test_the_talking_pose_yields_to_a_drag():
+    """Expressions never fight the user: dragging always wins."""
+    machine = machine_for(PACKAGED_MANIFEST)
+    assert apply_speaking(machine, True) == TALKING
+
+    machine.press()
+    machine.drag_started()
+    assert apply_speaking(machine, True) is None      # declined while dragging
+    assert machine.state == DRAGGING
+    assert apply_speaking(machine, False) is None     # no pose to end
+
+
+def test_talking_outranks_the_listening_pose():
+    """Speaking while the microphone is still open shows the talking pose."""
+    machine = machine_for(PACKAGED_MANIFEST)
+    assert apply_listening(machine, True) == LISTENING
+
+    assert apply_speaking(machine, True) == TALKING
+    assert machine.state == TALKING
+    # …and the listening pose comes back by itself when the playback ends.
+    assert apply_speaking(machine, False) == LISTENING
+    assert machine.state == LISTENING
+    assert apply_listening(machine, False) == IDLE

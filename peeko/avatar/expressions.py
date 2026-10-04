@@ -134,13 +134,17 @@ def apply_listening(machine, listening: bool) -> str | None:
     :param listening: ``True`` when a capture started, ``False`` when it
         ended.
     :returns: the state played, or ``None`` when the machine declined — the
-        artwork has no ``listening`` animation, or the user is dragging the
-        robot right now. The chat window keeps showing its own "listening…"
+        artwork has no ``listening`` animation, the user is dragging the robot
+        right now, or there was no pose to end. When a pose *was* ended the
+        state now on screen is returned (idle, or the talking pose if Peeko is
+        still speaking). The chat window keeps showing its own "listening…"
         indicator either way, so a decline is never a lie.
     """
     if listening:
         return LISTENING if machine.start_listening() else None
-    return IDLE if machine.stop_listening() else None
+    if not machine.stop_listening():
+        return None
+    return machine.state
 
 
 # --------------------------------------------------------------------------- #
@@ -158,13 +162,19 @@ def apply_speaking(machine, speaking: bool) -> str | None:
     :param speaking: ``True`` when a playback started, ``False`` when it
         finished (or failed, or was stopped).
     :returns: the state played, or ``None`` when the machine declined — the
-        artwork has no ``talking`` animation, or the user is dragging the
-        robot right now. The chat window keeps showing its own "Peeko is
-        speaking…" indicator either way, so a decline is never a lie.
+        artwork has no ``talking`` animation, the user is dragging the robot
+        right now, or there was no playback to end. When a pose *was* ended the
+        state now on screen is returned: idle, or the **listening** pose when
+        the microphone is still open (talking outranks listening, so the
+        listening pose is what comes back). The chat window keeps showing its
+        own "Peeko is speaking…" indicator either way, so a decline is never a
+        lie.
     """
     if speaking:
         return TALKING if machine.start_talking() else None
-    return IDLE if machine.stop_talking() else None
+    if not machine.stop_talking():
+        return None
+    return machine.state
 
 
 __all__ = [

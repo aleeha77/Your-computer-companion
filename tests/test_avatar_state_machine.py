@@ -37,6 +37,7 @@ from peeko.avatar.state_machine import (
     LOOK_UP,
     REACTION_STATES,
     SUSTAINED_STATES,
+    TALKING,
     AvatarStateMachine,
 )
 from peeko.errors import StartupError
@@ -107,6 +108,51 @@ def test_starts_idle_on_the_first_idle_frame(machine):
 def test_state_animation_map_falls_back_to_builtin_defaults(machine):
     """A manifest without ``state_animation_map`` uses the built-in map."""
     assert machine.state_animation_map == DEFAULT_STATE_ANIMATIONS
+    # …including both sustained states: the built-in map is the fallback the
+    # machine starts from, so a state added to ``SUSTAINED_STATES`` but
+    # forgotten in ``DEFAULT_STATE_ANIMATIONS`` fails right here.
+    for state in SUSTAINED_STATES:
+        assert DEFAULT_STATE_ANIMATIONS[state] == state
+        assert machine.state_animation_map[state] == state
+
+
+def test_the_packaged_artwork_covers_every_builtin_state():
+    """The shipped manifest can draw every state the built-in map names.
+
+    Optional states are switched off when the artwork lacks them (see below),
+    which is correct for older art — but the artwork Peeko actually ships must
+    not be the thing that silently drops ``talking`` or ``listening``. The
+    path is built from this module's own location so the test needs no Qt.
+    """
+    packaged = Path(state_machine.__file__).parent / "assets" / "manifest.json"
+    machine = AvatarStateMachine(
+        load_manifest(packaged), rng=random.Random(7)
+    )
+    assert machine.state_animation_map == DEFAULT_STATE_ANIMATIONS
+    assert machine.talking_available is True
+    assert machine.listening_available is True
+
+
+def test_the_effective_map_is_the_builtin_map_minus_unavailable_states(
+    avatar_assets, manifest_data
+):
+    """An optional animation the artwork lacks switches that state *off*.
+
+    This is the honest rule behind the fallback above: the builtin map always
+    names every state, and the machine's effective map is that map minus the
+    optional states this manifest cannot draw — never a silent downgrade of a
+    mandatory state, and never a pointer at an animation that is not there.
+    """
+    path = _manifest_without(avatar_assets, manifest_data, "talking", "listening")
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.state_animation_map == {
+        state: anim for state, anim in DEFAULT_STATE_ANIMATIONS.items()
+        if state not in (LISTENING, TALKING)
+    }
+    # The *builtin* map still carries them — only this artwork does not.
+    assert DEFAULT_STATE_ANIMATIONS[LISTENING] == LISTENING
+    assert DEFAULT_STATE_ANIMATIONS[TALKING] == TALKING
 
 
 def test_state_animation_map_can_be_overridden_by_the_manifest(
@@ -780,11 +826,208 @@ def test_listening_is_switched_off_when_the_manifest_lacks_it(
 
 
 def test_a_sustained_state_is_not_a_reaction(machine):
-    """Reactions are one-shot and cued; listening is neither."""
-    assert LISTENING in SUSTAINED_STATES
-    assert LISTENING not in REACTION_STATES
-    assert machine.reaction_available(LISTENING) is False
+    """Reactions are one-shot and cued; listening and talking are neither."""
+    assert SUSTAINED_STATES == (LISTENING, TALKING)
+    for state in SUSTAINED_STATES:
+        assert state not in REACTION_STATES
+        assert machine.reaction_available(state) is False
     assert machine.available_reactions == frozenset(
         {HOVER, DOUBLE_CLICK, CONFUSED}
     )
-    assert SUSTAINED_STATES == (LISTENING,)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: the sustained talking state (voice output)
+# --------------------------------------------------------------------------- #
+def test_the_artwork_can_show_the_talking_state(machine):
+    assert machine.talking_available is True
+    assert machine.talking is False
+    assert machine.can_play(TALKING) is True
+    assert machine.state_animation_map[TALKING] == TALKING
+
+
+def test_start_talking_plays_the_state_and_holds_it(machine):
+    """A sentence lasts as long as it lasts — so must the pose."""
+    assert machine.start_talking() is True
+    assert machine.state == TALKING
+    assert machine.talking is True
+    assert machine.current_animation == "talking"
+
+    # No settling back to idle, and no spontaneous blink/glance either.
+    advance(machine, 3_000.0)
+    assert machine.state == TALKING
+    assert machine.talking is True
+
+
+def test_a_one_shot_talking_animation_keeps_playing(machine, avatar_assets,
+                                                    manifest_data):
+    """The state is sustained by the engine, whatever the artwork says."""
+    from conftest import write_avatar_assets
+
+    manifest_data["animations"]["talking"]["loop"] = False
+    path = write_avatar_assets(Path(avatar_assets).parent, manifest_data)
+    one_shot = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert one_shot.start_talking() is True
+    advance(one_shot, 500.0)                # past its two 100 ms frames
+    assert one_shot.state == TALKING
+    assert one_shot.talking is True
+
+
+def test_stop_talking_returns_to_idle(machine):
+    machine.start_talking()
+    assert machine.stop_talking() is True
+    assert machine.state == IDLE
+    assert machine.talking is False
+    assert machine.stop_talking() is False      # nothing was playing any more
+    assert machine.state == IDLE
+
+
+def test_stop_talking_without_a_playback_is_ignored(machine):
+    assert machine.stop_talking() is False
+    assert machine.talking is False
+    assert machine.state == IDLE
+
+
+def test_start_talking_is_declined_while_the_robot_is_being_dragged(machine):
+    """User input always wins: a drag is never interrupted by the robot."""
+    machine.press()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+
+    assert machine.start_talking() is False
+    assert machine.talking is False
+    assert machine.state == DRAGGING
+
+
+def test_start_talking_is_declined_while_the_mouse_button_is_held(machine):
+    machine.press()
+    assert machine.start_talking() is False
+    assert machine.talking is False
+    assert machine.state == IDLE
+
+
+def test_a_drag_wins_over_the_talking_pose_and_it_resumes_afterwards(machine):
+    """Peeko keeps talking while carried, so the pose comes back on release."""
+    machine.start_talking()
+    machine.press()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+    assert machine.talking is True
+
+    machine.release(moved=True)
+    advance(machine, STEP_MS * 2)
+    assert machine.state == TALKING
+    assert machine.talking is True
+
+
+def test_a_state_machine_cue_does_not_interrupt_talking(machine):
+    """Peeko's own voice has the floor — a cued expression waits its turn."""
+    machine.start_talking()
+    assert machine.play_cued(DOUBLE_CLICK) is False
+    assert machine.state == TALKING
+    assert machine.current_animation == "talking"
+
+
+def test_a_reaction_still_plays_after_talking_stops(machine):
+    machine.start_talking()
+    machine.stop_talking()
+    assert machine.play_cued(HOVER) is True
+    assert machine.state == HOVER
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: two sustained states, one pose — precedence and exclusivity
+# --------------------------------------------------------------------------- #
+def test_exactly_one_sustained_state_is_on_screen_at_a_time(machine):
+    """Listening and talking can *both* be active; only one pose is drawn."""
+    assert machine.start_listening() is True
+    assert machine.state == LISTENING
+
+    assert machine.start_talking() is True
+    # Talking outranks listening while Peeko is audibly speaking.
+    assert machine.state == TALKING
+    assert machine.state in SUSTAINED_STATES
+    assert machine.talking is True
+    assert machine.listening is True        # the capture is still remembered
+
+
+def test_starting_a_capture_does_not_steal_the_talking_pose(machine):
+    machine.start_talking()
+    assert machine.start_listening() is True
+    assert machine.listening is True
+    assert machine.state == TALKING          # …and the pose does not move
+
+
+def test_the_listening_pose_resumes_when_the_playback_ends(machine):
+    machine.start_listening()
+    machine.start_talking()
+    assert machine.state == TALKING
+
+    assert machine.stop_talking() is True
+    assert machine.state == LISTENING        # the microphone is still open
+    assert machine.talking is False
+    assert machine.listening is True
+
+
+def test_stopping_the_capture_first_leaves_the_talking_pose_alone(machine):
+    """Ending the microphone never cuts Peeko off mid-sentence."""
+    machine.start_talking()
+    machine.start_listening()
+    assert machine.stop_listening() is False   # no listening pose was playing
+    assert machine.listening is False
+    assert machine.state == TALKING
+    assert machine.stop_talking() is True
+    assert machine.state == IDLE
+
+
+def test_a_drag_wins_over_both_sustained_states(machine):
+    """Either activity, or both: the user carrying Peeko always wins."""
+    machine.start_listening()
+    machine.start_talking()
+    machine.press()
+    machine.drag_started()
+    assert machine.state == DRAGGING
+
+    machine.release(moved=True)
+    advance(machine, STEP_MS * 2)
+    assert machine.state == TALKING            # talking still outranks listening
+
+
+def test_talking_is_switched_off_when_the_manifest_lacks_it(
+    avatar_assets, manifest_data
+):
+    """Stage 1-4 artwork keeps working — it just shows no talking pose."""
+    path = _manifest_without(avatar_assets, manifest_data, "talking")
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.talking_available is False
+    assert TALKING not in machine.state_animation_map
+    assert machine.can_play(TALKING) is False
+
+    # Every entry point stays silent instead of raising.
+    assert machine.start_talking() is False
+    assert machine.stop_talking() is False
+    assert machine.talking is False
+    assert machine.state == IDLE
+    assert machine.current_animation == "idle"
+
+    # …and the other sustained state is unaffected: the two are independent.
+    assert machine.listening_available is True
+    assert machine.start_listening() is True
+    assert machine.state == LISTENING
+
+
+def test_the_talking_state_can_be_remapped_by_the_manifest(
+    avatar_assets, manifest_data
+):
+    from conftest import write_avatar_assets
+
+    manifest_data["state_animation_map"] = {"talking": "hover"}
+    path = write_avatar_assets(Path(avatar_assets).parent, manifest_data)
+    machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
+
+    assert machine.talking_available is True
+    assert machine.state_animation_map[TALKING] == "hover"
+    assert machine.start_talking() is True
+    assert machine.current_animation == "hover"

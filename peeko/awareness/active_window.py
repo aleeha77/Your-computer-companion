@@ -1,6 +1,6 @@
 """Awareness subsystem: know what the user is doing.
 
-Stage 8: NOT IMPLEMENTED YET.
+Stage 9: NOT IMPLEMENTED YET.
 
 Planned behaviour: query the OS for the currently active window / app so
 Peeko can react contextually ("working in VS Code..."). This is
@@ -19,9 +19,9 @@ class ActiveWindowTracker:
     def get_active_window_title(self) -> str:
         """Return the title of the currently focused window.
 
-        .. note:: Stage 8 — not implemented yet.
+        .. note:: Stage 9 — not implemented yet.
         """
         raise NotImplementedError(
-            "ActiveWindowTracker is not implemented until Stage 8 "
+            "ActiveWindowTracker is not implemented until Stage 9 "
             "(app awareness)."
         )

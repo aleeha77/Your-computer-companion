@@ -21,6 +21,7 @@ no API key. What the tests pin down:
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from PySide6.QtCore import Qt
@@ -35,9 +36,14 @@ from peeko.ui.chat_window import (
     LISTENING_TEXT,
     MIC_LABEL,
     MIC_STOP_LABEL,
+    NOTHING_TO_SPEAK_TEXT,
     ROLE_NOTICE,
     ROLE_PEEKO,
     ROLE_USER,
+    SPEAKING_TEXT,
+    SPEAK_ENABLED_HINT,
+    SPEAK_LABEL,
+    SPEAK_STOP_LABEL,
     THINKING_TEXT,
     VOICE_DISABLED_TEXT,
     ChatEntry,
@@ -47,20 +53,28 @@ from peeko.ui.chat_window import (
 )
 from peeko.ui.context_menu import TALK_ID, future_entries, find_entry
 from peeko.voice.audio import UnavailableAudioSource
-from peeko.voice.errors import STTProviderError
+from peeko.voice.errors import STTProviderError, TTSProviderError
 from peeko.voice.input import SpeechRecognizer
+from peeko.voice.output import DISABLED_TEXT as TTS_DISABLED_TEXT
+from peeko.voice.output import SpeechSynthesizer
+from peeko.voice.output_providers import MockSpeechProvider
 from peeko.voice.providers import MockTranscriptionProvider
 from tests.conftest import (
     TEST_API_KEY,
     TEST_BASE_URL,
     FakeAudioSource,
+    FakeSpeechPlayer,
     FakeTransport,
     ai_client,
     ai_settings,
     completion_body,
     pcm_samples,
+    speech_synthesizer,
+    speech_wav,
     synchronous_submit,
     synchronous_submit_capture,
+    synchronous_submit_speech,
+    tts_settings,
     voice_recognizer,
     voice_settings,
     wait_for,
@@ -1141,6 +1155,445 @@ def test_the_chat_window_tells_the_avatar_it_is_listening(qapp, tmp_path):
         window.listeningChanged.emit(True)
         assert avatar._machine.state == "listening"
         window.listeningChanged.emit(False)
+        assert avatar._machine.state == "idle"
+    finally:
+        avatar.hide()
+        avatar.deleteLater()
+        qapp.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: voice output — the Speak button, the speaking state, honesty
+# --------------------------------------------------------------------------- #
+class FakeSpeechTask:
+    """A cancellable stand-in for the speech worker task the window holds."""
+
+    def __init__(self, text: str = "") -> None:
+        self.text = text
+        self.cancelled = 0
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+
+
+def stalled_submit_speech():
+    """A ``submit_speech`` double that starts nothing but hands back a task.
+
+    Used for the state-machine assertions (start/stop/close) where no outcome
+    should arrive at all — the arrival paths are covered separately with
+    :func:`tests.conftest.synchronous_submit_speech`.
+    """
+    tasks: list[FakeSpeechTask] = []
+
+    def submit(synthesizer, text, *, signals=None, pool=None):
+        task = FakeSpeechTask(text)
+        tasks.append(task)
+        return task
+
+    submit.tasks = tasks  # type: ignore[attr-defined]
+    return submit
+
+
+def speaking_window(tmp_path, speaker=None, *, enabled: bool = True,
+                    submit_speech=...):
+    """A chat window wired to fake audio (never a real speaker, never a request).
+
+    ``speaker`` is injected when a test needs to inspect what Peeko would have
+    said; when it is omitted the window builds one from the settings, exactly
+    as the running app does.
+    """
+    settings = tts_settings(tmp_path, enabled=enabled)
+    transport = FakeTransport(completion_body(GOOD_REPLY))
+    client = AIClient.from_settings(settings, transport=transport)
+    kwargs = {}
+    if speaker is not None:
+        kwargs["synthesizer"] = speaker
+    if submit_speech is not ...:
+        kwargs["submit_speech"] = submit_speech
+    window = ChatWindow(settings, client, submit=synchronous_submit(), **kwargs)
+    return window, transport
+
+
+def hint_text(window: ChatWindow) -> str:
+    """The window's hint line (the honest account of what is switched on)."""
+    return next(
+        widget.text() for widget in window.findChildren(QLabel)
+        if widget.objectName() == "chat_hint"
+    )
+
+
+def test_the_speak_button_is_visible_when_the_voice_is_on(qapp, tmp_path):
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(), submit_speech=synchronous_submit_speech()
+    )
+    try:
+        assert window.tts_enabled() is True
+        assert window._speak_button.isHidden() is False
+        assert window._speak_button.isEnabled() is True
+        assert window.speak_text() == SPEAK_LABEL
+        assert "speakers" in window._speak_button.toolTip().lower()
+        assert window.is_speaking() is False
+        # The hint line says what the button will do.
+        assert SPEAK_ENABLED_HINT in hint_text(window)
+        assert "PEEKO_TTS_ENABLED" not in hint_text(window)
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_speak_button_is_hidden_not_dead_when_the_voice_is_off(
+    qapp, tmp_path
+):
+    """With TTS off the hint line says which variable turns it on."""
+    window, _ = speaking_window(
+        tmp_path, enabled=False, submit_speech=synchronous_submit_speech()
+    )
+    try:
+        assert window.tts_enabled() is False
+        assert window._speak_button.isHidden() is True
+        assert window._speak_button.isEnabled() is False
+        assert "PEEKO_TTS_ENABLED=1" in hint_text(window)
+        assert window.speak_problem() == TTS_DISABLED_TEXT
+
+        # Asking anyway refuses in plain words instead of pretending.
+        window.append_entry(ChatEntry(ROLE_PEEKO, "something Peeko said"))
+        assert window.speak() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "PEEKO_TTS_ENABLED=1" in notice.text
+        assert window.is_speaking() is False
+        assert window.status_text() == ""
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_speak_setting_is_picked_up_when_the_window_refreshes(
+    qapp, tmp_path
+):
+    window, _ = speaking_window(
+        tmp_path, enabled=False, submit_speech=synchronous_submit_speech()
+    )
+    try:
+        assert window.tts_enabled() is False
+        assert window._speak_button.isHidden() is True
+        # As if PEEKO_TTS_ENABLED had been changed and the window reopened.
+        window._settings = tts_settings(tmp_path, enabled=True)
+        assert window.refresh_configuration() is True
+        assert window.tts_enabled() is True
+        assert window._speak_button.isHidden() is False
+        assert SPEAK_ENABLED_HINT in hint_text(window)
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_speak_button_plays_the_reply_in_the_transcript(qapp, tmp_path):
+    submit = stalled_submit_speech()
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(), submit_speech=submit
+    )
+    seen: list[bool] = []
+    window.speakingChanged.connect(seen.append)
+    try:
+        window.show()
+        window.append_entry(ChatEntry(ROLE_PEEKO, "a reply to say out loud"))
+        assert window.last_reply_text() == "a reply to say out loud"
+
+        window._speak_button.click()
+        assert window.is_speaking() is True
+        # Exactly Peeko's own reply text is what was handed to the worker.
+        assert submit.tasks[-1].text == "a reply to say out loud"
+        assert window.status_text() == SPEAKING_TEXT
+        assert window.speak_text() == SPEAK_STOP_LABEL
+        assert seen == [True]
+
+        # The same button stops it again, and nothing is left "speaking".
+        window._speak_button.click()
+        assert window.is_speaking() is False
+        assert submit.tasks[-1].cancelled == 1
+        assert window.speak_text() == SPEAK_LABEL
+        assert window.status_text() == ""
+        assert seen == [True, False]
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_reply_is_spoken_automatically_and_really_played(qapp, tmp_path):
+    """The whole path: reply -> synthesize -> decode -> "speakers"."""
+    provider = MockSpeechProvider(audio=speech_wav())
+    player = FakeSpeechPlayer()
+    window, transport = speaking_window(
+        tmp_path, speech_synthesizer(provider=provider, player=player),
+        submit_speech=synchronous_submit_speech(),
+    )
+    seen: list[bool] = []
+    window.speakingChanged.connect(seen.append)
+    try:
+        assert window.send_message("hello") is True
+        assert transport.call_count == 1
+        assert window.is_speaking() is True        # it starts with the reply
+        assert window.status_text() == SPEAKING_TEXT
+
+        assert wait_for(lambda: not window.is_speaking(), timeout_s=5.0)
+        assert provider.texts == [GOOD_REPLY_TEXT]
+        assert len(player.plays) == 1
+        assert player.plays[0][0].audio.startswith(b"RIFF")
+        assert seen == [True, False]
+        assert window.status_text() == ""
+        assert window.speak_text() == SPEAK_LABEL
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_with_the_voice_off_a_reply_is_never_spoken(qapp, tmp_path):
+    spoken: list[str] = []
+
+    def submit_speech(synthesizer, text, *, signals=None, pool=None):
+        spoken.append(text)
+        return "should-not-be-called"
+
+    window, transport = speaking_window(
+        tmp_path, speech_synthesizer(), enabled=False, submit_speech=submit_speech
+    )
+    try:
+        assert window.send_message("hello") is True
+        assert transport.call_count == 1
+        assert window.entries()[-1].role == ROLE_PEEKO
+        assert spoken == []                        # nothing was spoken
+        assert window.is_speaking() is False
+        assert window.status_text() == ""
+        assert [entry.role for entry in window.entries()] == [
+            ROLE_USER, ROLE_PEEKO
+        ]
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_speak_with_nothing_to_say_yet_says_so(qapp, tmp_path):
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(), submit_speech=stalled_submit_speech()
+    )
+    try:
+        assert window.speak() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert notice.text == NOTHING_TO_SPEAK_TEXT
+        assert window.is_speaking() is False
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_missing_key_is_reported_when_speak_is_pressed(qapp, tmp_path):
+    """One key configures chat and speech — and its absence is said out loud."""
+    speaker = SpeechSynthesizer.from_settings(
+        tts_settings(tmp_path, key=""), player=FakeSpeechPlayer()
+    )
+    window, transport = speaking_window(
+        tmp_path, speaker, submit_speech=synchronous_submit_speech()
+    )
+    try:
+        window.append_entry(ChatEntry(ROLE_PEEKO, "hi there"))
+        assert "PEEKO_AI_API_KEY" in window.speak_problem()
+
+        assert window.speak() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "PEEKO_AI_API_KEY" in notice.text
+        assert window.is_speaking() is False
+        assert transport.call_count == 0           # the chat was untouched
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_no_audio_device_is_reported_honestly_and_nothing_is_sent(
+    qapp, tmp_path
+):
+    provider = MockSpeechProvider(audio=speech_wav())
+    player = FakeSpeechPlayer(
+        availability="Peeko cannot speak: no audio output device."
+    )
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(provider=provider, player=player),
+        submit_speech=synchronous_submit_speech(),
+    )
+    try:
+        window.append_entry(ChatEntry(ROLE_PEEKO, "hi there"))
+        assert "no audio output device" in window.speak_problem()
+
+        assert window.speak() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "no audio output device" in notice.text
+        assert provider.calls == 0                 # the reply never left the machine
+        assert window.is_speaking() is False
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_an_http_error_is_reported_without_pretending(qapp, tmp_path):
+    speaker = speech_synthesizer(provider=MockSpeechProvider(
+        error=TTSProviderError(
+            "The speech service answered with HTTP 400. "
+            "It said: voice not found"
+        )
+    ))
+    window, _ = speaking_window(
+        tmp_path, speaker, submit_speech=synchronous_submit_speech()
+    )
+    try:
+        window.append_entry(ChatEntry(ROLE_PEEKO, "hi there"))
+        assert window.speak() is True
+        assert window.is_speaking() is True
+
+        assert wait_for(lambda: not window.is_speaking(), timeout_s=5.0)
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert "HTTP 400" in notice.text
+        assert "voice not found" in notice.text
+        assert window.status_text() == ""
+        assert window.speak_text() == SPEAK_LABEL
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_cancelled_playback_says_nothing_at_all(qapp, tmp_path):
+    player = FakeSpeechPlayer()
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(player=player),
+        submit_speech=synchronous_submit_speech(),
+    )
+    try:
+        window.append_entry(ChatEntry(ROLE_PEEKO, "a longer reply"))
+        assert window.speak() is True
+        assert window.stop_speaking() is True
+        for _ in range(50):
+            qapp.processEvents()
+
+        assert window.is_speaking() is False
+        assert window.entries()[-1].role == ROLE_PEEKO    # nothing was added
+        assert window.status_text() == ""
+        assert player.stops == 1                          # the stop was honoured
+        assert player.plays == []                         # and nothing was played
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_closing_the_window_stops_the_playback(qapp, tmp_path):
+    submit = stalled_submit_speech()
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(), submit_speech=submit
+    )
+    try:
+        window.show()
+        window.append_entry(ChatEntry(ROLE_PEEKO, "hi"))
+        assert window.speak() is True
+        window.close()
+        assert window.is_speaking() is False
+        assert submit.tasks[-1].cancelled == 1
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_broken_speech_worker_is_reported_instead_of_raising(qapp, tmp_path):
+    def broken_submit(*_args, **_kwargs):
+        raise RuntimeError("cannot start the speech worker")
+
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(), submit_speech=broken_submit
+    )
+    try:
+        window.append_entry(ChatEntry(ROLE_PEEKO, "hi"))
+        assert window.speak() is False
+        notice = window.entries()[-1]
+        assert notice.role == ROLE_NOTICE and notice.error is True
+        assert window.is_speaking() is False
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_synthesizer_is_rebuilt_from_settings_unless_one_is_injected(
+    qapp, tmp_path
+):
+    """A .env edit is picked up by the next Speak press, like the AI client."""
+    window, _ = speaking_window(tmp_path, submit_speech=synchronous_submit_speech())
+    try:
+        first = window.synthesizer()
+        assert isinstance(first, SpeechSynthesizer)
+        assert window.synthesizer() is not first    # rebuilt from settings
+        assert first.player.name == "sounddevice"
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+    injected = speech_synthesizer()
+    window, _ = speaking_window(
+        tmp_path, injected, submit_speech=synchronous_submit_speech()
+    )
+    try:
+        assert window.synthesizer() is injected
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_chat_window_keeps_the_audio_library_lazy(qapp, tmp_path):
+    """Speaking is optional: the window never imports ``sounddevice``."""
+    assert "sounddevice" not in sys.modules
+    window, _ = speaking_window(
+        tmp_path, speech_synthesizer(), submit_speech=synchronous_submit_speech()
+    )
+    try:
+        window.speak_problem()                     # a real config check
+        window.append_entry(ChatEntry(ROLE_PEEKO, "hi"))
+        assert window.speak() is True
+        assert window.speak_text() == SPEAK_STOP_LABEL
+        assert "sounddevice" not in sys.modules
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# The bridge to the avatar: the robot shows it is speaking
+# --------------------------------------------------------------------------- #
+def test_the_avatar_shows_the_talking_pose(qapp, tmp_path):
+    avatar = AvatarWindow(ai_settings(tmp_path))
+    try:
+        assert avatar.play_speaking(True) == "talking"
+        assert avatar._machine.state == "talking"
+        assert avatar._machine.talking is True
+        assert avatar.play_speaking(False) == "idle"
+        assert avatar._machine.state == "idle"
+        assert avatar._machine.talking is False
+        assert avatar.play_speaking(False) is None    # already ended
+    finally:
+        avatar.hide()
+        avatar.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_chat_window_tells_the_avatar_it_is_speaking(qapp, tmp_path):
+    """The real wiring: window.speakingChanged -> the robot's pose."""
+    avatar = AvatarWindow(ai_settings(tmp_path))
+    try:
+        action = next(a for a in avatar._menu.actions() if a.data() == TALK_ID)
+        avatar._on_menu_triggered(action)
+        window = avatar._chat_window
+
+        window.speakingChanged.emit(True)
+        assert avatar._machine.state == "talking"
+        window.speakingChanged.emit(False)
         assert avatar._machine.state == "idle"
     finally:
         avatar.hide()

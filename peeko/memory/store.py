@@ -1,10 +1,10 @@
 """Memory subsystem: persistent memory for Peeko.
 
-Stage 4: NOT IMPLEMENTED YET.
+Stage 8: NOT IMPLEMENTED YET.
 
 Planned behaviour: store conversation history and durable facts in the
 SQLite database (see :mod:`peeko.db`), optionally summarized over time.
-The :class:`MemoryStore` interface below is the Stage 4 contract; methods
+The :class:`MemoryStore` interface below is the Stage 8 contract; methods
 raise ``NotImplementedError`` until implemented.
 """
 
@@ -23,19 +23,19 @@ class MemoryStore:
     def remember(self, kind: str, key: str, value: Any) -> None:
         """Persist a memory of ``kind`` under ``key``.
 
-        .. note:: Stage 4 — not implemented yet.
+        .. note:: Stage 8 — not implemented yet.
         """
         raise NotImplementedError(
-            "MemoryStore.remember is not implemented until Stage 4 "
+            "MemoryStore.remember is not implemented until Stage 8 "
             "(persistent memory)."
         )
 
     def recall(self, kind: str, key: str) -> Any | None:
         """Return a previously stored memory, or ``None``.
 
-        .. note:: Stage 4 — not implemented yet.
+        .. note:: Stage 8 — not implemented yet.
         """
         raise NotImplementedError(
-            "MemoryStore.recall is not implemented until Stage 4 "
+            "MemoryStore.recall is not implemented until Stage 8 "
             "(persistent memory)."
         )

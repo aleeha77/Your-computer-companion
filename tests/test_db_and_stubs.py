@@ -88,17 +88,76 @@ def test_the_voice_recognizer_is_no_longer_a_stub():
 
 
 def test_unimplemented_subsystems_raise_honestly():
-    """Future-stage interfaces must fail loudly, never fake success."""
+    """Future-stage interfaces must fail loudly, never fake success.
+
+    The stage numbers are the owner's roadmap: 1 avatar → 2 interaction → 3 AI
+    chat → 4 voice input → 5 TTS → 6 emotions → 7 needs → 8 memory → 9 app
+    awareness. A stub that names a stage already behind us (or someone else's
+    stage) is exactly the kind of white lie this test exists to catch.
+    """
     from peeko.memory.store import MemoryStore
 
     store = MemoryStore(db_path=Path("/nonexistent/peeko.db"))
-    with pytest.raises(NotImplementedError, match="Stage 4"):
+    with pytest.raises(NotImplementedError, match="Stage 8"):
         store.remember("fact", "owner", "Ada")
+    with pytest.raises(NotImplementedError, match="Stage 8"):
+        store.recall("fact", "owner")
 
     from peeko.awareness.active_window import ActiveWindowTracker
 
-    with pytest.raises(NotImplementedError, match="Stage 8"):
-        ActiveWindowTracker().get_active_window_title()
+    tracker = ActiveWindowTracker()
+    with pytest.raises(NotImplementedError, match="Stage 9"):
+        tracker.get_active_window_title()
+
+    # Nothing claims to be finished that is not: the two remaining stubs name
+    # *future* stages, never the stages Peeko has already shipped.
+    for method, args in ((store.remember, ("fact", "owner", "Ada")),
+                         (store.recall, ("fact", "owner")),
+                         (tracker.get_active_window_title, ())):
+        with pytest.raises(NotImplementedError) as excinfo:
+            method(*args)
+        message = str(excinfo.value)
+        assert "Stage 8" in message or "Stage 9" in message
+        assert "Stage 4" not in message and "Stage 5" not in message
+
+
+def test_the_speech_synthesizer_is_no_longer_a_stub():
+    """Stage 5 replaced the TTS stub with a real, honest synthesizer.
+
+    No request and no speaker happen here: the point is that the synthesizer
+    reports its own configuration truthfully instead of pretending (see
+    :mod:`tests.test_voice_output` for synthesis, playback and the worker, and
+    :mod:`tests.test_ui_chat_window` for the Speak button end to end).
+    """
+    from peeko.voice.errors import VoiceConfigError
+    from peeko.voice.output import SpeechSynthesizer
+
+    unconfigured = SpeechSynthesizer()          # no key, no provider
+    assert unconfigured.configuration_problem() != ""
+    assert "PEEKO_AI_API_KEY" in unconfigured.configuration_problem()
+    with pytest.raises(VoiceConfigError):
+        unconfigured.speak("hello")
+
+    # A configured synthesizer really speaks — the mock provider and the fake
+    # player are test doubles, so this stays offline and needs no speaker.
+    from peeko.voice.output_providers import MockSpeechProvider
+
+    from conftest import FakeSpeechPlayer, speech_wav
+
+    provider = MockSpeechProvider(audio=speech_wav())
+    player = FakeSpeechPlayer()
+    speaker = SpeechSynthesizer(provider=provider, player=player)
+    clip = speaker.speak("hello")
+    assert clip is not None
+    assert provider.texts == ["hello"]
+    assert len(player.plays) == 1
+    assert player.plays[0][0].audio.startswith(b"RIFF")
+
+    # …and a switched-off voice refuses instead of pretending to speak.
+    quiet = SpeechSynthesizer(provider=provider, player=player, enabled=False)
+    with pytest.raises(VoiceConfigError) as excinfo:
+        quiet.speak("hello")
+    assert "PEEKO_TTS_ENABLED=1" in excinfo.value.message
 
 
 def test_ai_client_never_leaks_key():

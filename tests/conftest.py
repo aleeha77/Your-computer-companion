@@ -43,8 +43,14 @@ PEEKO_ENV_VARS = [
     "PEEKO_STT_BASE_URL",
     "PEEKO_VOICE_TIMEOUT_S",
     "PEEKO_VOICE_MAX_SECONDS",
+    "PEEKO_TTS_ENABLED",
     "PEEKO_TTS_ENGINE",
     "PEEKO_TTS_VOICE",
+    "PEEKO_TTS_MODEL",
+    "PEEKO_TTS_SPEED",
+    "PEEKO_TTS_VOLUME",
+    "PEEKO_TTS_BASE_URL",
+    "PEEKO_TTS_TIMEOUT_S",
 ]
 
 
@@ -252,6 +258,19 @@ def minimal_manifest() -> dict:
                 "frames": [
                     {"eyes": "layers/eyes_up.svg", "dy": -2, "duration_ms": 100},
                     {"eyes": "layers/eyes_open.svg", "duration_ms": 100},
+                ],
+            },
+            # -- Stage 5 sustained state ----------------------------------- #
+            # Present for the same reason ``listening`` is: the throw-away
+            # fixture must describe *current* artwork, otherwise the
+            # machine's optional-state switch-off (which is real behaviour)
+            # masquerades as a missing default in the state map.
+            "talking": {
+                "loop": True,
+                "frames": [
+                    {"eyes": "layers/eyes_half.svg", "dy": -2,
+                     "duration_ms": 100},
+                    {"eyes": "layers/eyes_happy.svg", "duration_ms": 100},
                 ],
             },
         },
@@ -744,4 +763,186 @@ def synchronous_submit_capture(*, raise_unexpected: bool = False):
         return "inline-task"
 
     submit.started = started  # type: ignore[attr-defined]
+    return submit
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: voice-output fakes — no speaker, no socket, no sounddevice
+# --------------------------------------------------------------------------- #
+def speech_wav(frames: int = 400, *, rate: int = 16_000,
+               sample: int = 1_000) -> bytes:
+    """A small, valid 16-bit mono WAV payload (standard library only).
+
+    Playback really decodes WAV, so the fakes feed it real audio rather than a
+    string of bytes that only looks like audio.
+    """
+    import io
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(int(rate))
+        handle.writeframes(
+            int(sample).to_bytes(2, "little", signed=True) * int(frames)
+        )
+    return buffer.getvalue()
+
+
+class FakeSpeechPlayer:
+    """A player double: records what it was asked to play, opens no device.
+
+    Satisfies :class:`peeko.voice.player.AudioPlayer`, so the real
+    :class:`~peeko.voice.output.SpeechSynthesizer` runs unchanged — including
+    its stop/cancel handling — on a machine with no speakers at all.
+    """
+
+    name = "fake"
+
+    def __init__(self, *, availability: str = "", played: bool = True,
+                 error: BaseException | None = None) -> None:
+        #: Non-empty makes this player unavailable — exactly as an honest
+        #: player reports why it cannot play.
+        self.reason = availability
+        self.will_play = played
+        self.error = error
+        self.plays: list[tuple[object, float]] = []
+        self.stops = 0
+        self.closes = 0
+
+    def availability(self) -> str:
+        return self.reason
+
+    def play(self, clip, *, volume: float = 1.0, should_stop=None) -> bool:
+        self.plays.append((clip, volume))
+        if self.error is not None:
+            raise self.error
+        return self.will_play
+
+    def stop(self) -> None:
+        self.stops += 1
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+def tts_settings(tmp_path, *, key: str = TEST_API_KEY, enabled: bool = True,
+                 voice: str = "verse", model: str = "tts-1-hd", **overrides):
+    """Real settings with Peeko's voice switched on and a key configured.
+
+    ``key`` is deliberately the *same* ``PEEKO_AI_API_KEY`` the chat uses,
+    because that is the design: one key configures chat, dictation and speech.
+    """
+    from peeko.settings import Settings
+
+    values = dict(
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        log_dir=tmp_path / "logs",
+        ai_provider="openai-compatible",
+        ai_model="test-model",
+        ai_api_key=key,
+        ai_base_url=TEST_BASE_URL,
+        tts_enabled=enabled,
+        tts_engine="",
+        tts_voice=voice,
+        tts_model=model,
+        tts_base_url=TEST_BASE_URL,
+    )
+    values.update(overrides)
+    return Settings(**values)
+
+
+def speech_synthesizer(*, audio: bytes | None = None, player=None, provider=None,
+                       enabled: bool = True, engine_problem: str = "",
+                       **kwargs):
+    """A real :class:`~peeko.voice.output.SpeechSynthesizer` over fakes.
+
+    A :class:`FakeSpeechPlayer` stands in for the speakers and a
+    :class:`peeko.voice.output_providers.MockSpeechProvider` for the service,
+    so the complete speak → decode → play path runs with no hardware, no
+    network and no API key.
+    """
+    from peeko.voice.output import SpeechSynthesizer
+    from peeko.voice.output_providers import MockSpeechProvider
+
+    if provider is None:
+        provider = MockSpeechProvider(
+            audio=speech_wav() if audio is None else audio
+        )
+    return SpeechSynthesizer(
+        provider=provider,
+        player=FakeSpeechPlayer() if player is None else player,
+        enabled=enabled,
+        engine_problem=engine_problem,
+        **kwargs,
+    )
+
+
+def synchronous_submit_speech(*, raise_unexpected: bool = False):
+    """A drop-in for ``peeko.voice.worker.submit_speech`` that runs inline.
+
+    Mirrors :func:`synchronous_submit_capture`: the utterance is synthesized
+    and "played" on the caller's thread (no thread pool, no speaker), but the
+    worker's four outcomes are delivered through the Qt event loop on a
+    zero-delay timer — the same *ordering* the real worker's queued signal
+    delivery produces, where the window has already entered its speaking state
+    before an outcome arrives.
+    """
+    from PySide6.QtCore import QTimer
+
+    from peeko.voice.errors import VoiceError
+
+    class InlineSpeechTask:
+        """A cancellable stand-in for the worker task the window holds."""
+
+        def __init__(self, synthesizer, text: str, signals) -> None:
+            self.synthesizer = synthesizer
+            self.text = text
+            self.signals = signals
+            self.cancel_calls = 0
+            self._cancelled = False
+
+        @property
+        def is_cancelled(self) -> bool:
+            return self._cancelled
+
+        def _should_stop(self) -> bool:
+            return self._cancelled
+
+        def cancel(self) -> None:
+            self.cancel_calls += 1
+            self._cancelled = True
+            self.synthesizer.stop()
+
+    started: list[InlineSpeechTask] = []
+
+    def submit(synthesizer, text, *, signals=None, pool=None):
+        task = InlineSpeechTask(synthesizer, text, signals)
+        started.append(task)
+
+        def deliver() -> None:
+            try:
+                clip = synthesizer.speak(
+                    text, should_stop=task._should_stop
+                )
+            except VoiceError as exc:
+                signals.failed.emit(exc.message)
+            except Exception as exc:  # noqa: BLE001 - mirrors the worker
+                if raise_unexpected:
+                    raise
+                signals.failed.emit(f"unexpected: {exc}")
+            else:
+                if clip is not None:
+                    signals.finished.emit()
+                elif task.is_cancelled:
+                    signals.cancelled.emit()
+                else:
+                    signals.empty.emit()
+
+        QTimer.singleShot(0, deliver)
+        return task
+
+    submit.tasks = started  # type: ignore[attr-defined]
     return submit
