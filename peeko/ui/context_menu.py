@@ -7,9 +7,11 @@ stages — labelled honestly as *not implemented*, and answering with an
 explanation of when they land.
 
 Stage 3 turns the first of them on: **Talk** now opens the real chat window
-(see :mod:`peeko.ui.chat_window`). **Check Status**, **Settings** and
-**Quit** work as before, and the remaining pet actions stay labelled as
-future work.
+(see :mod:`peeko.ui.chat_window`). Stage 6 turns on **Pet** and **Play**,
+which apply the emotion engine's documented interaction effects — they change
+Peeko's live mood and needs, and they are not decorative buttons. **Check
+Status**, **Settings** and **Quit** work as before, and **Feed**, **Sleep**
+and **Wake Up** stay labelled as Stage 7 work.
 
 Everything is described by :data:`MENU_SPEC` — a single, inspectable data
 structure the Qt builder consumes, so "what the menu shows" can be tested
@@ -30,9 +32,17 @@ from peeko import __stage__, __total_stages__, __version__
 # Action ids (the value carried in ``QAction.setData``)
 # --------------------------------------------------------------------------- #
 TALK_ID = "talk"
+FEED_ID = "feed"
+PET_ID = "pet"
+PLAY_ID = "play"
+SLEEP_ID = "sleep"
+WAKE_ID = "wake"
 STATUS_ID = "check_status"
 SETTINGS_ID = "settings"
 QUIT_ID = "quit"
+
+#: Pet actions that are real since Stage 6 (they drive the emotion engine).
+EMOTION_ACTION_IDS: tuple[str, ...] = (PET_ID, PLAY_ID)
 
 
 @dataclass(frozen=True)
@@ -79,16 +89,21 @@ class MenuEntry:
 #: Stage 2 keeps every planned pet action visible so the roadmap is legible
 #: from the app itself, marks the future ones in their own label, and groups
 #: them above a separator so "what works" is obvious at a glance. Stage 3
-#: drops the "(not implemented)" label from *Talk*, which now works.
+#: drops the "(not implemented)" label from *Talk*, and Stage 6 does the same
+#: for *Pet* and *Play*, which now drive the emotion engine's real interaction
+#: effects. *Feed*, *Sleep* and *Wake Up* stay labelled — they belong to the
+#: Stage 7 needs simulation and do not exist yet.
 MENU_SPEC: tuple[Optional[MenuEntry], ...] = (
     MenuEntry(TALK_ID, "Talk", None,
               "chat with Peeko in its own window (needs your own AI key)"),
-    MenuEntry("feed", "Feed", 7, "hunger, from the virtual-pet needs system"),
-    MenuEntry("pet", "Pet", 6, "petting reactions from the emotions system"),
-    MenuEntry("play", "Play", 6, "play reactions from the emotions system"),
-    MenuEntry("sleep", "Sleep", 7, "sleep and energy from the needs system"),
-    MenuEntry("wake", "Wake Up", 7, "waking up, from the needs system"),
-    None,  # separator: planned features above, working ones below
+    MenuEntry(FEED_ID, "Feed", 7, "hunger, from the virtual-pet needs system"),
+    MenuEntry(PET_ID, "Pet", None,
+              "Peeko's mood lifts and he feels closer to you"),
+    MenuEntry(PLAY_ID, "Play", None,
+              "fun and excitement — it costs energy and makes him hungry"),
+    MenuEntry(SLEEP_ID, "Sleep", 7, "sleep and energy from the needs system"),
+    MenuEntry(WAKE_ID, "Wake Up", 7, "waking up, from the needs system"),
+    None,  # separator: pet actions above, the rest of the menu below
     MenuEntry(STATUS_ID, "Check Status…", None,
               "what Peeko is doing right now"),
     MenuEntry(SETTINGS_ID, "Settings…", None,
@@ -181,9 +196,15 @@ def separator_positions(menu: QMenu) -> list[int]:
 
 
 __all__ = [
+    "EMOTION_ACTION_IDS",
+    "FEED_ID",
     "MENU_ENTRIES",
     "MENU_SPEC",
+    "PET_ID",
+    "PLAY_ID",
     "QUIT_ID",
+    "SLEEP_ID",
+    "WAKE_ID",
     "SETTINGS_ID",
     "STATUS_ID",
     "TALK_ID",

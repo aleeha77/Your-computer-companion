@@ -74,12 +74,43 @@ def _avatar_lines(machine, manifest) -> list[str]:
     return lines
 
 
-def build_status_text(settings, machine=None, manifest=None) -> str:
+#: The six stats Check Status shows, in display order (Stage 6).
+STAT_ORDER: tuple[str, ...] = (
+    "happiness", "energy", "hunger", "boredom", "sleepiness", "friendship",
+)
+
+#: What the readout says about the life of these numbers (honest: Stage 8
+#: persistence does not exist yet).
+STATS_NOTE = (
+    "In-memory only for this run — persistence arrives in Stage 8, so these "
+    "values start fresh every time Peeko starts."
+)
+
+
+def _emotion_lines(emotions) -> list[str]:
+    """The live six-stat read-out, or an honest "unavailable" line."""
+    if emotions is None:
+        return ["(unavailable — no emotion engine in this build)"]
+    snapshot = emotions.snapshot()
+    stats = snapshot.stats()
+    lines = [f"Mood now: {snapshot.emotion_name}"]
+    for name in STAT_ORDER:
+        lines.append(f"  {name.capitalize()}: {stats[name]:.0f} / 100")
+    lines.append(f"  PAD (pleasure, arousal, dominance): {snapshot.pad}")
+    lines.append(f"  Simulated drift this run: {emotions.hours_elapsed:.2f} h")
+    lines.append(STATS_NOTE)
+    return lines
+
+
+def build_status_text(settings, machine=None, manifest=None, emotions=None) -> str:
     """The full Check Status readout, built from live, existing state.
 
     :param settings: the running :class:`peeko.settings.Settings`.
     :param machine: optional avatar state machine (duck-typed).
     :param manifest: optional parsed artwork manifest (duck-typed).
+    :param emotions: optional live
+        :class:`peeko.emotions.engine.EmotionEngine` (duck-typed) — Stage 6's
+        real mood and needs.
     """
     artworks = (
         str(settings.avatar_assets_dir)
@@ -98,6 +129,8 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         "drives the robot's expression",
         "voice input (Stage 4): the Mic button listens through your "
         "microphone and puts the words in the message box",
+        "pet actions (Stage 6): Pet and Play change Peeko's real mood and "
+        "needs, and chatting lifts them too",
     ]
     if getattr(settings, "tts_enabled", False):
         works_today.append(
@@ -131,6 +164,10 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
         f"  ({client.configuration_problem() or 'ready to chat'})",
         f"  {client.describe()}",
         "",
+        "EMOTIONS & NEEDS (Stage 6)",
+        _RULE,
+        *_emotion_lines(emotions),
+        "",
         "WORKS TODAY",
         _RULE,
         *[f"  - {item}" for item in works_today],
@@ -146,7 +183,8 @@ def build_status_text(settings, machine=None, manifest=None) -> str:
     return "\n".join(lines)
 
 
-def build_status_dialog(parent, settings, machine=None, manifest=None) -> QMessageBox:
+def build_status_dialog(parent, settings, machine=None, manifest=None,
+                        emotions=None) -> QMessageBox:
     """Build (but do not show) the Check Status message box."""
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Information)
@@ -154,14 +192,17 @@ def build_status_dialog(parent, settings, machine=None, manifest=None) -> QMessa
     box.setTextFormat(Qt.PlainText)
     box.setText(f"{__app_name__} v{__version__} — Stage {__stage__} of "
                 f"{__total_stages__}")
-    box.setInformativeText(build_status_text(settings, machine, manifest))
+    box.setInformativeText(
+        build_status_text(settings, machine, manifest, emotions)
+    )
     box.setStandardButtons(QMessageBox.Close)
     return box
 
 
-def show_status_dialog(parent, settings, machine=None, manifest=None) -> QMessageBox:
+def show_status_dialog(parent, settings, machine=None, manifest=None,
+                       emotions=None) -> QMessageBox:
     """Show the status readout without blocking the UI thread."""
-    box = build_status_dialog(parent, settings, machine, manifest)
+    box = build_status_dialog(parent, settings, machine, manifest, emotions)
     _open_async(box)
     return box
 

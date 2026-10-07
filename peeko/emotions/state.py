@@ -1,7 +1,8 @@
 """Emotions subsystem: Peeko's emotional state model.
 
-Stage 6 (emotion engine that drives avatar expressions): NOT IMPLEMENTED
-YET — but the core data model is real and used by later stages.
+Stage 6 (the emotion engine that owns this state, drifts it over time,
+applies interaction effects and drives avatar expressions) is implemented in
+:mod:`peeko.emotions.engine`; this module is the data model it builds on.
 
 The model uses the well-known PAD (pleasure–arousal–dominance)
 dimensional theory of emotion plus a named :class:`Emotion` enum, giving

@@ -89,6 +89,7 @@ from PySide6.QtWidgets import QWidget
 from peeko.ai.context import InteractionLog, build_context
 from peeko.avatar.assets import AssetLibrary
 from peeko.avatar.expressions import (
+    apply_emotion,
     apply_expression,
     apply_listening,
     apply_speaking,
@@ -96,8 +97,10 @@ from peeko.avatar.expressions import (
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.renderer import draw_frame
 from peeko.avatar.state_machine import IDLE, AvatarStateMachine
+from peeko.emotions.engine import EmotionEngine
 from peeko.ui.chat_window import ChatWindow
 from peeko.ui.context_menu import (
+    EMOTION_ACTION_IDS,
     QUIT_ID,
     SETTINGS_ID,
     STATUS_ID,
@@ -124,6 +127,10 @@ POINTER_POLL_MS = 150
 POINTER_GLANCE_RADIUS = 320
 #: Mouse movement (px) that separates a click from a drag.
 DRAG_THRESHOLD_PX = 6
+#: How often the emotion engine's drift is advanced (ms). Once a second is
+#: far finer than the simulated decay (per *hour*), and the tick is a few
+#: float operations — it can never block the UI thread.
+EMOTION_TICK_MS = 1000
 
 
 class AvatarWindow(QWidget):
@@ -139,6 +146,10 @@ class AvatarWindow(QWidget):
     #: (carries the entry id) — useful for logging and tests.
     notImplementedRequested = Signal(str)
 
+    #: Stage 6: emitted after a pet/play interaction was applied by the
+    #: emotion engine (carries the interaction id) — handy for logging/tests.
+    interactionApplied = Signal(str)
+
     def __init__(self, settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
@@ -153,6 +164,10 @@ class AvatarWindow(QWidget):
         #: Real, bounded record of what the user and Peeko just did — sent to
         #: the AI as part of the structured context (Stage 3).
         self._interactions = InteractionLog()
+        #: Stage 6: Peeko's live mood and needs. One engine per window; it
+        #: drifts on the timer below, changes when the user interacts, and is
+        #: what the chat context and Check Status read.
+        self._emotions = EmotionEngine()
 
         # ---- asset pipeline: manifest -> pixmaps -> machine ---------------- #
         # ``PEEKO_AVATAR_ASSETS_DIR`` lets the owner point Peeko at their own
@@ -206,6 +221,12 @@ class AvatarWindow(QWidget):
         self._pointer_timer.setInterval(POINTER_POLL_MS)
         self._pointer_timer.timeout.connect(self._on_pointer_poll)
         self._pointer_timer.start()
+
+        # ---- emotion drift (Stage 6, QTimer-driven, never blocks) ---------- #
+        self._emotion_timer = QTimer(self)
+        self._emotion_timer.setInterval(EMOTION_TICK_MS)
+        self._emotion_timer.timeout.connect(self._on_emotion_tick)
+        self._emotion_timer.start()
 
     # ------------------------------------------------------------------ #
     # Geometry
@@ -348,18 +369,30 @@ class AvatarWindow(QWidget):
             self._show_status()
         elif action_id == SETTINGS_ID:
             self._show_settings()
+        elif action_id in EMOTION_ACTION_IDS:
+            # Stage 6: Pet and Play are real — they change Peeko's mood and
+            # needs through the emotion engine.
+            self._on_pet_action(action_id)
         elif entry is not None and not entry.implemented:
             self._on_not_implemented(entry)
         else:  # pragma: no cover - defensive: unknown action id
             LOG.warning("Unknown menu action id: %r", action_id)
 
     def _show_status(self) -> None:
-        """Check Status: an honest readout of live state."""
+        """Check Status: an honest readout of live state.
+
+        Stage 6: the readout includes the six live stats, and checking on
+        Peeko counts as the small documented "status" interaction, so the
+        numbers in the dialog are the state *after* the tick that freshened
+        them.
+        """
         LOG.info("Showing status readout.")
+        self._emotions.tick()
+        self._emotions.interact("status")
         self._keep_dialog(
             show_status_dialog(
                 self, self._settings, machine=self._machine,
-                manifest=self._manifest,
+                manifest=self._manifest, emotions=self._emotions,
             )
         )
 
@@ -378,7 +411,9 @@ class AvatarWindow(QWidget):
                 interactions=self._interactions,
                 parent=self,
             )
-            self._chat_window.expressionRequested.connect(self.play_expression)
+            self._chat_window.expressionRequested.connect(
+                self._on_expression_requested
+            )
             # Stage 4: the chat window owns the microphone; the robot only
             # shows what it is doing ("listening…").
             self._chat_window.listeningChanged.connect(self.play_listening)
@@ -397,12 +432,62 @@ class AvatarWindow(QWidget):
     def build_ai_context(self):
         """Structured context for the next chat message.
 
-        Today only the interaction log carries real data; emotions, needs,
-        memory and app awareness are documented placeholders until Stages
-        6/7/8, which will pass their live state in here instead. Nothing in
-        this method touches the network or blocks.
+        Since Stage 6 the mood (``emotion``, ``happiness``) and the needs
+        (``energy``, ``hunger``, ``sleepiness``, ``friendship``) are the live
+        values of :attr:`emotions` — Peeko's real, drifting state, not
+        placeholders. Memory (Stage 8) and app awareness (Stage 9) are still
+        honestly reported as unknown. The drift is advanced first so the model
+        sees the mood as of the message. Nothing in this method touches the
+        network or blocks.
         """
-        return build_context(interactions=self._interactions)
+        self._emotions.tick()
+        return build_context(
+            emotional_state=self._emotions.state,
+            needs=self._emotions.needs,
+            interactions=self._interactions,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Stage 6: mood and needs
+    # ------------------------------------------------------------------ #
+    @property
+    def emotions(self) -> EmotionEngine:
+        """The live emotion engine (mood, needs, interaction effects)."""
+        return self._emotions
+
+    def _on_emotion_tick(self) -> None:
+        """Advance the mood/needs drift by however long really passed."""
+        hours = self._emotions.tick()
+        if hours:
+            LOG.debug("Emotion drift %.4fh -> %s", hours,
+                      self._emotions.describe())
+
+    def _on_pet_action(self, action_id: str) -> None:
+        """Pet / Play: apply the engine's documented interaction effect.
+
+        The mood change is real and visible (Check Status shows it), and the
+        dominant emotion it produces cues one of the *existing* animations
+        through :func:`peeko.avatar.expressions.apply_emotion` — with the
+        documented fallback when the placeholder artwork cannot play it.
+        """
+        self._emotions.tick()  # freshen before applying the delta
+        effect = self._emotions.interact(action_id)
+        self._interactions.record(f"user chose {effect.id}: {effect.summary}")
+        played = apply_emotion(self._machine, self._emotions.dominant_emotion())
+        LOG.info("Interaction %r -> %s (avatar state %r)",
+                 effect.id, self._emotions.describe(), played)
+        self.interactionApplied.emit(effect.id)
+
+    def _on_expression_requested(self, animation: str) -> str | None:
+        """One AI reply arrived: count the chat turn, then play its animation.
+
+        A reply means a conversation turn really happened, so the engine's
+        documented "talk" effect applies (Peeko gets a little happier and
+        friendlier). Then the reply's animation is played exactly as before.
+        """
+        effect = self._emotions.chat_turn()
+        self._interactions.record(f"chat turn: {effect.summary}")
+        return self.play_expression(animation)
 
     def play_expression(self, animation: str) -> str | None:
         """Play the animation the AI reply asked for.

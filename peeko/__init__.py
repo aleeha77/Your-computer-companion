@@ -1,5 +1,17 @@
 """Peeko — a cute, animated desktop robot companion.
 
+Stage 6: moods and needs. Peeko now has a real, drifting inner life:
+:mod:`peeko.emotions.engine` owns one PAD emotional state and one
+:class:`peeko.needs.system.PetNeeds`, drifts both with a per-second QTimer (on
+an injectable clock, so the drift is deterministic in tests), and applies
+documented interaction effects — the menu's **Pet** and **Play** are real
+buttons now, and a completed chat turn counts as a friendly talk. The six
+0..100 stats (happiness, energy, hunger, boredom, sleepiness, friendship) are
+what the chat context sends to the AI and what Check Status shows, and the
+dominant emotion cues one of the *existing* artwork animations through
+:mod:`peeko.avatar.expressions`. The stats live in memory only for now —
+persistence lands in Stage 8.
+
 Stage 4: voice input. Peeko can now *hear* you: the chat window's **Mic**
 button records through the microphone, sends the audio to an
 OpenAI-compatible speech-to-text endpoint, and puts the recognised words in
@@ -45,5 +57,5 @@ functionality.
 
 __app_name__ = "Peeko"
 __version__ = "0.1.0"
-__stage__ = 5
+__stage__ = 6
 __total_stages__ = 13

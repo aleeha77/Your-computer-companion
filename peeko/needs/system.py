@@ -1,9 +1,11 @@
 """Needs subsystem: Peeko's virtual-pet needs (hunger, sleep, ...).
 
-Stage 7 (full needs simulation driving behaviour): NOT IMPLEMENTED YET.
-The core data model below is real: needs live in [0, 100] and decay over
-real time via :meth:`PetNeeds.tick`. Stage 7 will add feeding/sleeping
-interactions, the UI, and wiring needs into the emotion engine.
+Stage 7 (full needs simulation driving behaviour): NOT IMPLEMENTED YET —
+feeding, sleeping and their UI are still to come. The core data model below
+is real: needs live in [0, 100] and decay over real time via
+:meth:`PetNeeds.tick`. Stage 6 already owns a live :class:`PetNeeds` inside
+:class:`peeko.emotions.engine.EmotionEngine` and drifts it while the app
+runs, so these values are read live by the chat context and Check Status.
 """
 
 from __future__ import annotations

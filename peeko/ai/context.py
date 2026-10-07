@@ -10,11 +10,13 @@ state and situation::
 :func:`build_context` is the **seam** later stages plug into. Everything it
 needs is an optional argument:
 
-* ``emotional_state`` — a real :class:`peeko.emotions.state.EmotionalState`
-  (Stage 6 wires the live mood in; today the caller may pass one, or the
-  builder reports the neutral default);
-* ``needs`` — a real :class:`peeko.needs.system.PetNeeds` (Stage 7 tick it
-  over time; today the documented starting values are used);
+* ``emotional_state`` — a real :class:`peeko.emotions.state.EmotionalState`.
+  Since Stage 6 the avatar window passes the live engine's state in, so
+  ``emotion`` and ``happiness`` are real, drifting values; a caller that
+  passes nothing still gets the documented neutral default;
+* ``needs`` — a real :class:`peeko.needs.system.PetNeeds`, likewise the live
+  one owned by :class:`peeko.emotions.engine.EmotionEngine` since Stage 6
+  (Stage 7 adds feeding/sleeping on top);
 * ``active_app_provider`` — a callable returning the active window title
   (Stage 9 app awareness). ``None`` means "unknown", which is what the
   model is told — never a guess;

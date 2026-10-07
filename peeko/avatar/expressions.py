@@ -50,6 +50,7 @@ from peeko.avatar.state_machine import (
     LOOK_UP,
     TALKING,
 )
+from peeko.emotions.state import Emotion
 
 #: AI animation name -> avatar state. Keys must stay a subset of
 #: :data:`peeko.ai.vocabulary.ALLOWED_ANIMATIONS` (a test enforces this).
@@ -73,6 +74,66 @@ ANIMATION_STATE_MAP: dict[str, str] = {
 
 #: What Peeko plays when the AI asks for something he cannot do.
 FALLBACK_STATE = IDLE
+
+# --------------------------------------------------------------------------- #
+# Stage 6: the emotion engine's dominant mood -> an existing animation
+# --------------------------------------------------------------------------- #
+#: Dominant :class:`peeko.emotions.state.Emotion` -> the AI animation *intent*
+#: the avatar already understands. Every value here must be a key of
+#: :data:`ANIMATION_STATE_MAP` (a test enforces that), so an emotion can only
+#: ever reach artwork that really exists — never an invented animation.
+#:
+#: The mapping is honestly approximate while the placeholder artwork has no
+#: dedicated mood frames: there is no sleepy or angry animation yet, so
+#: ``tired`` borrows the blink and ``angry`` borrows the "huh?" head-shake (the
+#: only displeased-looking reaction in the manifest). When the owner replaces
+#: the artwork — or a later stage adds real mood frames — only this table
+#: changes. :func:`emotion_animation` returns ``None`` for a mood the current
+#: artwork cannot play, and the caller keeps whatever animation is running
+#: rather than showing something unrelated.
+EMOTION_ANIMATION_MAP: dict[Emotion, str] = {
+    Emotion.NEUTRAL: "idle",
+    Emotion.HAPPY: "happy_bounce",
+    Emotion.EXCITED: "excited_bounce",
+    Emotion.SURPRISED: "look_up",
+    Emotion.SAD: "look_down",
+    Emotion.TIRED: "blink",
+    Emotion.ANGRY: "talking_confused",
+}
+
+
+def emotion_animation(emotion, machine=None) -> str | None:
+    """The animation intent for a dominant emotion, or ``None``.
+
+    ``None`` means "leave the current animation alone": the emotion is
+    unknown, the mapping has no entry for it, or the current artwork cannot
+    play the mapped state. Callers use :func:`apply_emotion` to actually cue
+    it.
+    """
+    try:
+        intent = EMOTION_ANIMATION_MAP.get(emotion)
+    except TypeError:  # unhashable / not an Emotion at all
+        return None
+    if intent is None:
+        return None
+    if machine is not None and not machine.can_play(
+        ANIMATION_STATE_MAP[intent]
+    ):
+        return None
+    return intent
+
+
+def apply_emotion(machine, emotion) -> str | None:
+    """Cue the animation for a dominant emotion; return the state played.
+
+    ``None`` means nothing changed: no artwork-supported animation for that
+    mood, or the machine declined because the user is dragging the robot —
+    the same precedence every other cue follows.
+    """
+    intent = emotion_animation(emotion, machine)
+    if intent is None:
+        return None
+    return apply_expression(machine, intent)
 
 #: What Peeko plays while a voice capture is running (Stage 4). Optional
 #: artwork: without a ``listening`` animation nothing is played, and the chat
@@ -179,10 +240,13 @@ def apply_speaking(machine, speaking: bool) -> str | None:
 
 __all__ = [
     "ANIMATION_STATE_MAP",
+    "EMOTION_ANIMATION_MAP",
     "FALLBACK_STATE",
     "LISTENING_STATE",
     "TALKING_STATE",
+    "apply_emotion",
     "apply_expression",
+    "emotion_animation",
     "apply_listening",
     "apply_speaking",
     "expression_state",
