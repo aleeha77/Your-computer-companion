@@ -174,12 +174,17 @@ def test_the_talk_entry_opens_the_chat_window(qapp, tmp_path):
         qapp.processEvents()
 
 
-def test_talk_is_the_only_menu_entry_that_graduated():
+def test_talk_pet_and_play_are_the_menu_entries_that_graduated():
     talk = find_entry(TALK_ID)
     assert talk is not None and talk.implemented is True
     assert talk.display_label == "Talk"
+    # Stage 6 turned the emotion interactions into real menu entries too.
+    for action_id in ("pet", "play"):
+        entry = find_entry(action_id)
+        assert entry is not None and entry.implemented is True
+        assert entry.display_label == entry.label
     still_future = {entry.id for entry in future_entries()}
-    assert still_future == {"feed", "pet", "play", "sleep", "wake"}
+    assert still_future == {"feed", "sleep", "wake"}
 
 
 def test_reopening_talk_reuses_the_window_and_keeps_the_conversation(
@@ -499,8 +504,12 @@ def test_the_avatar_context_is_built_from_real_interactions(qapp, tmp_path):
         context = avatar.build_ai_context()
         assert context.recent_interactions == ("user clicked the robot",)
         assert "recent_interactions" not in context.placeholders
-        # Pet state stays an honest placeholder until Stages 6/7.
-        assert "emotion" in context.placeholders
+        # The pet state is live since Stage 6 (the mood/needs engine feeds
+        # this context); memory stays an honest placeholder until Stage 8.
+        for field in ("emotion", "happiness", "energy", "hunger",
+                      "sleepiness", "friendship"):
+            assert field not in context.placeholders
+        assert "memory" in context.placeholders
     finally:
         avatar.hide()
         avatar.deleteLater()

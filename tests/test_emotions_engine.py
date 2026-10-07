@@ -42,6 +42,21 @@ def engine(**kwargs) -> EmotionEngine:
     return EmotionEngine(clock=FakeClock(), **kwargs)
 
 
+@pytest.fixture(scope="module")
+def machine():
+    """A real state machine on the artwork that ships with Peeko."""
+    import random
+
+    from peeko.avatar.manifest import load_manifest
+    from peeko.avatar.state_machine import AvatarStateMachine
+    from peeko.avatar.widget import DEFAULT_ASSETS_DIR
+
+    return AvatarStateMachine(
+        load_manifest(DEFAULT_ASSETS_DIR / "manifest.json"),
+        rng=random.Random(4),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Drift over an injectable clock
 # --------------------------------------------------------------------------- #
@@ -63,9 +78,14 @@ def test_tick_with_no_elapsed_time_changes_nothing():
 def test_pad_drifts_toward_neutral_and_never_past_it():
     eng = engine(state=EmotionalState.from_emotion(Emotion.HAPPY))
     eng.tick(hours=1.0)
+    # Pleasure decays slowest, so an hour still leaves a little of it…
     assert eng.state.pleasure == pytest.approx(0.7 - 0.6)
-    assert eng.state.arousal == pytest.approx(0.4 - 1.2)
-    assert eng.state.dominance == pytest.approx(0.5 - 0.8)
+    # …while arousal (fastest decay) and dominance have already arrived at
+    # neutral: the drift stops at 0.0 and never overshoots into the opposite
+    # mood, however long Peeko is left alone.
+    assert eng.state.arousal == pytest.approx(0.0)
+    assert eng.state.dominance == pytest.approx(0.0)
+    assert eng.state.arousal >= 0.0 and eng.state.dominance >= 0.0
     eng.tick(hours=100.0)
     assert eng.state.tuple() == (0.0, 0.0, 0.0)  # clamps, no overshoot
 
@@ -113,6 +133,13 @@ def test_play_costs_energy_and_hunger_and_lifts_boredom():
     assert eng.needs.get(Need.ENERGY) == pytest.approx(76.0)
     assert eng.needs.get(Need.HUNGER) == pytest.approx(78.5)
     assert eng.needs.get(Need.BOREDOM) == pytest.approx(78.0)
+    # One round is a deliberate nudge, so it moves Peeko *toward* the
+    # happy/excited corner of the PAD cube without landing there yet…
+    assert eng.state.pleasure == pytest.approx(0.18)
+    assert eng.state.arousal == pytest.approx(0.25)
+    # …while a few rounds of play really do land on a happy/excited mood.
+    eng.interact("play")
+    eng.interact("play")
     assert eng.dominant_emotion() in (Emotion.HAPPY, Emotion.EXCITED)
 
 
@@ -196,9 +223,13 @@ def test_emotion_animation_never_lies_about_the_artwork():
     assert apply_emotion(NoArtwork(), Emotion.TIRED) is None
 
 
-def test_expressions_module_keeps_the_mapping_honest():
+def test_expressions_module_keeps_the_mapping_honest(machine):
     for intent in EMOTION_ANIMATION_MAP.values():
-        assert expression_state(intent, None) in ("idle",) or True
+        # Every mood maps to an intent this module understands…
+        assert intent in ANIMATION_STATE_MAP
+        # …and to a state the artwork that ships with Peeko can really play,
+        # so an emotion can never invent an animation or silently fall back.
+        assert expression_state(intent, machine) == ANIMATION_STATE_MAP[intent]
 
 
 # --------------------------------------------------------------------------- #

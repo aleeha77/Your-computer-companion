@@ -737,15 +737,15 @@ def test_a_planned_menu_entry_reacts_and_explains_instead_of_pretending(
         seen: list[str] = []
         window.notImplementedRequested.connect(seen.append)
 
-        window._on_menu_triggered(_action_for(window, "pet"))
+        window._on_menu_triggered(_action_for(window, "feed"))
         assert window._machine.state == CONFUSED      # "huh?" head-shake
-        assert seen == ["pet"]
+        assert seen == ["feed"]
 
         boxes = window.findChildren(QMessageBox)
         assert len(boxes) == 1
         text = boxes[0].informativeText()
         assert "not implemented" in text.lower()
-        assert "Stage 6" in text
+        assert "Stage 7" in text
         assert boxes[0].isModal() is False
     finally:
         _destroy(window, qapp)

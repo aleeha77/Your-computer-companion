@@ -6,7 +6,7 @@ maintainable, portable **Python desktop application** (PySide6/Qt) — modular,
 privacy-first, no cloud infrastructure. You configure optional AI/voice API
 keys yourself via a local `.env` file and run it on your own machine.
 
-> **Current development stage: Stage 5 of 13 (text-to-speech —
+> **Current development stage: Stage 6 of 13 (emotions —
 > completed).**
 > See [Current development stage](#current-development-stage) below.
 
@@ -79,6 +79,33 @@ keys yourself via a local `.env` file and run it on your own machine.
   played unless audio really came back, the audio is never written to disk,
   and synthesis plus playback run on a worker thread so the robot keeps
   animating while Peeko talks.
+- ✅ **Peeko has feelings — a live emotion engine** (Stage 6): one PAD
+  (pleasure–arousal–dominance) mood plus six `0..100` stats — **happiness,
+  energy, hunger, boredom, sleepiness, friendship**. Left alone, Peeko drifts
+  back toward neutral (pleasure decays slowest, arousal fastest) and the needs
+  decay on their own documented clock; every value is clamped, so nothing can
+  run away. The drift runs on a `QTimer` callback, never on the UI thread, so
+  the robot keeps animating.
+- ✅ **Pet and Play are real interactions now** (Stage 6): pick *Pet* or *Play*
+  from the right-click menu and Peeko's *live* mood and needs change — petting
+  lifts happiness and friendship, playing is fun and exciting but costs energy
+  and makes him hungrier. Those two entries have lost their "not implemented"
+  label because they no longer are; *Feed*, *Sleep* and *Wake Up* keep theirs
+  until the Stage 7 needs simulation.
+- ✅ **The AI sees Peeko's real mood** (Stage 6): the structured context sent
+  with every chat message now carries the live emotion, happiness, energy,
+  hunger, sleepiness and friendship instead of documented placeholders, and one
+  completed reply counts as the documented *talk* interaction that nudges the
+  mood. Only memory and app awareness remain honest placeholders (Stages 8–9).
+- ✅ **Feelings drive the *existing* artwork** (Stage 6): the dominant emotion
+  maps onto animations the loaded manifest can really play (happy → the
+  squash-and-bounce, excited → the bigger double-click bounce, tired → a blink,
+  sad → a downward glance, …). A mood the current artwork cannot show changes
+  nothing at all rather than inventing an animation — replace the artwork and
+  only one table in the code changes.
+- ✅ **Check Status shows the mood** (Stage 6): the live readout now lists the
+  dominant emotion and all six stats, and says plainly that they are kept in
+  memory for this run until Stage 8 adds persistence.
 - ✅ **Voice input never freezes the robot** (Stage 4): recording and the HTTP
   round trip both run on a worker thread, so the animation keeps ticking, you
   can keep typing and you can close the window while it listens.
@@ -122,8 +149,9 @@ keys yourself via a local `.env` file and run it on your own machine.
   keeps animating while a window is open. No sleeps anywhere.
 - ✅ **Headless smoke test**: `PEEKO_SMOKE_TEST=1` auto-quits ~2 s after
   launch with exit code 0, so CI/headless boxes can verify the whole app.
-- 🔜 **Coming in later stages**: emotions, virtual-pet needs, persistent
-  memory, app awareness, autonomous life, polish, packaging, final testing.
+- 🔜 **Coming in later stages**: virtual-pet needs that drive behaviour,
+  persistent memory, app awareness, autonomous life, polish, packaging, final
+  testing.
 
 ## Tech stack
 
@@ -233,12 +261,12 @@ you drag it anywhere on the desktop.
 **The interaction menu** (right-click → menu):
 
 ```
-Peeko v0.1.0 — Stage 5 of 13          (info header, not clickable)
+Peeko v0.1.0 — Stage 6 of 13          (info header, not clickable)
 ────────────────────────────────
 Talk
 Feed — Stage 7 (not implemented)
-Pet — Stage 6 (not implemented)
-Play — Stage 6 (not implemented)
+Pet                                   (real since Stage 6)
+Play                                  (real since Stage 6)
 Sleep — Stage 7 (not implemented)
 Wake Up — Stage 7 (not implemented)
 ────────────────────────────────
@@ -248,6 +276,11 @@ Settings…
 Quit                                  Ctrl+Q
 ```
 
+- **Pet** and **Play** change Peeko's live mood and needs (see
+  [Stage 6](#current-development-stage)) and the robot reacts with the right
+  animation. **Feed**, **Sleep** and **Wake Up** are still labelled
+  `— Stage 7 (not implemented)`; picking one opens a plain explanation of when
+  it lands instead of a fake window.
 - **Check Status…** opens a live readout: version/stage, the animation and
   state Peeko is in *right now*, the reactions the loaded artwork can play,
   animation/canvas/layer facts from the manifest, where the artwork came
@@ -346,7 +379,8 @@ peeko/
 ├── ai/                conversational AI (Stage 3)
    ├── client.py     AIClient: persona + context in, validated reply out
    ├── personality.py the persona (data) + the JSON contract for the model
-   ├── context.py    the structured context block (the seam for Stages 6/7/8)
+   ├── context.py    the structured context block (fed live by Stage 6;
+                      the seam for Stages 7/8)
    ├── providers.py  engine-agnostic seam + OpenAI-compatible provider
    ├── schema.py     validates model output against the allowed lists
    ├── vocabulary.py the allowed emotions / animations / actions
@@ -362,8 +396,13 @@ peeko/
    ├── player.py      playback through sounddevice (imported lazily) + WAV
    ├── worker.py      Qt bridge: runs a capture or an utterance off-thread
    └── errors.py      honest, key-free voice error messages
-├── emotions/          PAD emotional-state model (real data model at Stage 0)
-├── needs/             virtual-pet needs model + decay logic (real at Stage 0)
+├── emotions/          live emotion engine (Stage 6)
+   ├── state.py       PAD emotional-state model + the named emotions
+   └── engine.py      EmotionEngine: drift over an injectable clock,
+                      documented interaction effects, the six-stat snapshot
+├── needs/             virtual-pet needs model + per-hour decay (Stage 6
+                      already drifts one live inside the emotion engine;
+                      Stage 7 adds feeding/sleeping and their UI)
 ├── memory/            persistent memory — Stage 8, interface only
 ├── awareness/         active-app awareness — Stage 8, interface only
 ├── db/                SQLite connection + schema versioning (real at Stage 0)
@@ -373,7 +412,7 @@ peeko/
    └── dialogs.py       Check Status readout, read-only Settings, "not yet"
 ```
 
-**How they relate at Stage 3:**
+**How they relate at Stage 6:**
 
 - `__main__` → `app` → `settings` + `paths` + `logging_setup` + `errors`
   → `avatar` (window) + `ui` (menu and dialogs).
@@ -392,8 +431,16 @@ peeko/
   honesty of every readout is unit-tested without a display.
 - `db` is wired and tested now so Stages 7/8 can persist needs and memory
   without rework.
-- `emotions` and `needs` ship as real, unit-tested data models that later
-  stages animate and simulate.
+- Inside `emotions` (Stage 6): `EmotionEngine` owns one `EmotionalState` and
+  one `PetNeeds`, reads time through an *injectable clock* (so tests are
+  deterministic and nothing blocks), drifts both toward neutral/zero with the
+  documented per-hour rates, applies the `INTERACTION_EFFECTS` deltas for
+  talk/pet/play/status (clamped to the unit cube and `0..100`) and reports the
+  six-stat snapshot the chat context and Check Status use.
+  `avatar/widget.py` owns one live engine, advances it from a `QTimer`
+  callback, passes the snapshot into `build_context()` and points
+  `avatar/expressions.py` at the animation for the dominant emotion. The
+  engine imports no Qt, so it is unit-testable without a display.
 - Inside `ai` (Stage 3): `client.py` builds the prompt from `personality.py`
   plus the structured context from `context.py`, sends it through the
   `providers.py` seam (one real OpenAI-compatible provider, stdlib HTTP), and
@@ -428,6 +475,39 @@ peeko/
   to speak, and it never plays anything it did not actually receive.
 
 ## Current development stage
+
+**Stage 6 of 13 — emotions (completed).** Peeko is no longer a happy face with
+no feelings: it has a live inner state, and two of its menu actions change it:
+
+1. **one mood, six stats** — the mood is a PAD
+   (pleasure–arousal–dominance) state in `[-1, 1]`; `happiness` is the
+   pleasure axis mapped onto `0..100` (`(pleasure + 1) / 2 * 100`, so 50 is
+   neutral) and the other five stats come from the virtual-pet needs —
+   **energy, hunger, boredom, sleepiness, friendship**. `Check Status…` lists
+   the dominant mood and all six numbers and says plainly that they live in
+   memory for this run until Stage 8 adds persistence;
+2. **it drifts by itself** — with nobody interacting, the PAD axes decay
+   toward neutral at documented rates (pleasure `0.6`/hour, arousal `1.2`,
+   dominance `0.8`) and the needs decay on their own per-hour clock. The
+   drift never overshoots neutral, everything is clamped, and it advances
+   from a `QTimer` callback in `avatar/widget.py`, so the robot never stops
+   animating and the UI thread is never blocked;
+3. **two real interactions** — *Pet* and *Play* in the right-click menu apply
+   the `INTERACTION_EFFECTS` table: petting is `+0.20` pleasure and friendship,
+   playing is fun and exciting but costs energy and raises hunger. They are
+   real menu entries now (no "not implemented" label, no placeholder dialog);
+   a completed chat reply also counts as the documented *talk* interaction;
+4. **the AI and the robot both see the mood** — the structured context sent
+   with every chat message carries the live emotion/happiness/energy/hunger/
+   sleepiness/friendship (memory and app awareness stay honest placeholders),
+   and the dominant emotion maps onto animations the loaded manifest can
+   really play (`avatar/expressions.py`); a mood the artwork cannot show
+   changes nothing rather than inventing an animation;
+5. **still honest** — nothing is persisted yet (Stage 8), the needs are *read*
+   live but feeding/sleeping are not implemented until Stage 7 (those three
+   menu entries keep their label), and no new `.env` variable was added: the
+   engine's rates and effects are documented constants in
+   `peeko/emotions/engine.py`.
 
 **Stage 5 of 13 — text-to-speech (completed).** Peeko can now *speak*:
 
@@ -530,14 +610,14 @@ begins.
   meant to be replaced — see
   [Avatar artwork](#avatar-artwork--swap-in-your-own-robot). Nothing about
   the placeholder is hard-coded in the engine.
-- The character only knows its Stage 1–5 behaviours (idle, blink, glance,
-  click, double-click, hover, drag, "huh?", listening, talking). It can listen
-  and speak, but it cannot feel or need anything yet — those are Stages 6–7.
-- **The remaining pet actions (Feed, Pet, Play, Sleep, Wake Up) do not do
-  anything yet.** They are deliberately visible and labelled `— Stage N (not
-  implemented)`, and picking one opens an explanation rather than pretending.
-  The pet-action roadmap stages are read from one table in the code, so the
-  menu can never drift from this list.
+- The character knows its Stage 1–6 behaviours (idle, blink, glance, click,
+  double-click, hover, drag, "huh?", listening, talking, and the mood-driven
+  expressions). It can listen, speak and *feel* now, but feeding and sleeping
+  are still to come — those are the Stage 7 needs simulation.
+- **The remaining pet actions (Feed, Sleep, Wake Up) do not do anything yet.**
+  They are deliberately visible and labelled `— Stage 7 (not implemented)`,
+  and picking one opens an explanation rather than pretending. *Pet* and
+  *Play* are real since Stage 6 and are no longer labelled.
 - **A real conversation needs your own API key.** Peeko has no cloud
   backend: set `PEEKO_AI_API_KEY` (and `PEEKO_AI_MODEL`) in `.env` to chat.
   Without a key the chat window says so and no request is ever attempted.
@@ -573,8 +653,9 @@ begins.
   implemented yet** — their config variables exist but have no effect, and
   their interfaces raise `NotImplementedError` naming the stage that will
   build them. Peeko's chat does not remember anything between runs until the
-  memory stage lands, and its mood/needs in the AI context are still
-  documented placeholders until Stages 6–7.
+  memory stage lands. Its mood and needs are live since Stage 6, but they are
+  held **in memory only** — every restart starts Peeko back at neutral, and
+  Stage 8 is what will save and restore them.
 - **Peeko cannot control your computer.** It can chat and play an expression;
   that is all. The chat window says so, and the `action` field of every
   AI reply is forced to `null`.

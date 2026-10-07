@@ -1,8 +1,10 @@
 """The interaction menu and its dialogs (offscreen Qt).
 
 Stage 3 turned the menu's *Talk* entry on: it now opens the real chat window
-(see :mod:`tests.test_ui_chat_window`), so this file covers the entries that
-are still planned — and that the two are clearly distinguished.
+(see :mod:`tests.test_ui_chat_window`). Stage 6 did the same for *Pet* and
+*Play* — they apply the emotion engine's documented interaction effects — so
+this file covers both the entries that really work and the ones that are
+still planned, and that the two are clearly distinguished.
 
 Two things are checked here:
 
@@ -35,6 +37,8 @@ from peeko.avatar.widget import DEFAULT_ASSETS_DIR
 from peeko.settings import Settings
 from peeko.ui.context_menu import (
     MENU_SPEC,
+    PET_ID,
+    PLAY_ID,
     QUIT_ID,
     SETTINGS_ID,
     STATUS_ID,
@@ -62,14 +66,21 @@ from peeko.ui.dialogs import (
 
 PACKAGED_MANIFEST = DEFAULT_ASSETS_DIR / "manifest.json"
 
-#: The pet actions the owner listed for the menu, with the stage that
-#: implements each. Order matters: it is the documented menu order.
+#: The pet actions that are *still* only planned, with the stage that will
+#: implement each. Order matters: it is the documented menu order. Pet and
+#: Play used to be listed here; Stage 6 turned them into real interactions
+#: (they drive the live emotion engine), so only the Stage 7 needs actions
+#: remain.
 EXPECTED_FUTURE_ENTRIES = (
     ("feed", "Feed", 7),
-    ("pet", "Pet", 6),
-    ("play", "Play", 6),
     ("sleep", "Sleep", 7),
     ("wake", "Wake Up", 7),
+)
+
+#: The pet actions that became real in Stage 6, in menu order.
+EXPECTED_EMOTION_ACTIONS = (
+    ("pet", "Pet"),
+    ("play", "Play"),
 )
 
 
@@ -93,13 +104,24 @@ def machine():
 # --------------------------------------------------------------------------- #
 # Menu structure — every entry present, planned ones flagged
 # --------------------------------------------------------------------------- #
-def test_menu_lists_every_planned_pet_action_with_its_stage():
+def test_menu_lists_the_remaining_planned_pet_actions_with_their_stage():
     future = future_entries()
     assert [(e.id, e.label, e.stage) for e in future] == list(
         EXPECTED_FUTURE_ENTRIES
     )
     for entry in future:
         assert entry.implemented is False
+
+
+def test_pet_and_play_are_real_interaction_entries_since_stage_6():
+    for action_id, label in EXPECTED_EMOTION_ACTIONS:
+        entry = find_entry(action_id)
+        assert entry is not None
+        assert entry.label == label
+        assert entry.implemented is True
+        assert entry.stage is None
+        assert entry.display_label == label  # no "(not implemented)" suffix
+        assert "not implemented" not in entry.description.lower()
 
 
 def test_menu_planned_entries_are_labelled_as_not_implemented():
@@ -112,9 +134,14 @@ def test_menu_planned_entries_are_labelled_as_not_implemented():
 
 def test_menu_has_the_working_entries_the_owner_asked_for():
     working = {e.id: e for e in entries() if e.implemented}
-    # Talk joined the working entries in Stage 3 (it opens the chat window).
-    assert set(working) == {TALK_ID, STATUS_ID, SETTINGS_ID, QUIT_ID}
+    # Talk joined the working entries in Stage 3 (it opens the chat window);
+    # Pet and Play joined in Stage 6 (they drive the emotion engine).
+    assert set(working) == {
+        TALK_ID, PET_ID, PLAY_ID, STATUS_ID, SETTINGS_ID, QUIT_ID,
+    }
     assert working[TALK_ID].display_label == "Talk"
+    assert working[PET_ID].display_label == "Pet"
+    assert working[PLAY_ID].display_label == "Play"
     assert working[STATUS_ID].display_label == "Check Status…"
     assert working[SETTINGS_ID].display_label == "Settings…"
     assert working[QUIT_ID].display_label == "Quit"
@@ -184,9 +211,14 @@ def test_built_menu_tooltips_flag_the_planned_entries(qapp):
     menu = build_avatar_context_menu(None)
     try:
         by_id = {action.data(): action for action in menu.actions()}
-        assert "Not implemented yet" in by_id["pet"].toolTip()
-        # Working entries carry no "coming soon" tooltip (Qt reports the
-        # action text when no tooltip is set).
+        # The Stage 7 needs actions are still flagged…
+        for entry in future_entries():
+            assert "Not implemented yet" in by_id[entry.id].toolTip()
+        # …while the Stage 6 emotion interactions are real, so they carry no
+        # "coming soon" tooltip (Qt reports the action text when none is set).
+        for action_id, _ in EXPECTED_EMOTION_ACTIONS:
+            assert "Not implemented" not in by_id[action_id].toolTip()
+        # Working entries carry no "coming soon" tooltip either.
         assert "Not implemented" not in by_id[STATUS_ID].toolTip()
     finally:
         menu.deleteLater()
