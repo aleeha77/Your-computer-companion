@@ -43,6 +43,7 @@ from peeko.avatar.widget import (
 from peeko.errors import StartupError
 from peeko.settings import Settings
 from peeko.ui.context_menu import (
+    NEEDS_BARS_ID,
     QUIT_ID,
     SETTINGS_ID,
     STATUS_ID,
@@ -661,7 +662,12 @@ def test_the_widget_menu_is_the_shared_interaction_menu(qapp, settings):
             action.data() for action in window._menu.actions()
             if not action.isSeparator()
         ]
-        assert ids == ["header"] + [entry.id for entry in entries()]
+        # "Show Needs Bars" is a real checkable toggle deliberately kept out of
+        # MENU_SPEC (it manages the needs-bars panel, not a Peeko action); it is
+        # inserted directly above Quit by the avatar window.
+        expected = ["header"] + [entry.id for entry in entries()]
+        expected.insert(expected.index(QUIT_ID), NEEDS_BARS_ID)
+        assert ids == expected
     finally:
         _destroy(window, qapp)
 
