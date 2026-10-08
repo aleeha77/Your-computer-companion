@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 from peeko import __app_name__, __stage__, __total_stages__, __version__
 from peeko.ai.client import AIClient
 from peeko.ai.providers import DEFAULT_BASE_URL
+from peeko.needs.behaviour import MAX_ATTENTION_NUDGES_PER_HOUR
+from peeko.needs.system import FOODS
 from peeko.ui.context_menu import MenuEntry, future_entries
 
 #: Section rules are plain text so the readout renders identically everywhere.
@@ -102,6 +104,60 @@ def _emotion_lines(emotions) -> list[str]:
     return lines
 
 
+def _feed_lines(emotions, machine=None) -> list[str]:
+    """Stage 7: the real feeding/sleeping facts, or an honest "unavailable".
+
+    Every line is built from the live engine (:meth:`needs_status`), never from
+    a hopeful guess: whether Peeko is asleep, what he last ate and how long
+    ago, how the sleep loop is behaving, and — separately — whether the
+    artwork can show a real sleeping pose or is showing the documented
+    fallback.
+    """
+    if emotions is None:
+        return ["(unavailable — no needs engine in this build)"]
+    status = getattr(emotions, "needs_status", None)
+    if status is None:  # pragma: no cover - defensive for older engines
+        return ["(this build's engine reports no feeding or sleeping state)"]
+    report = status()
+    lines = [f"  State: {'asleep — napping' if report.asleep else 'awake'}"]
+    if report.last_meal:
+        lines.append(
+            f"  Last meal: {report.last_meal} (fed "
+            f"{report.last_meal_ago_hours:.2f} simulated hours ago)"
+        )
+    else:
+        lines.append(
+            "  Last meal: nothing yet this run — use Feed in the right-click "
+            "menu"
+        )
+    lines.append(
+        f"  Sleeps this run: {report.sleeps}"
+        f" ({report.auto_sleeps} started by Peeko on his own,"
+        f" {report.auto_wakes} automatic wake-ups)"
+    )
+    lines.append(
+        f"  Yawns / attention nudges so far: {report.yawns} / "
+        f"{report.attention_nudges} (nudges are capped at "
+        f"{MAX_ATTENTION_NUDGES_PER_HOUR} an hour, so Peeko never spams)"
+    )
+    lines.append(
+        "  Foods on the Feed menu: "
+        + ", ".join(food.label for food in FOODS.values())
+    )
+    if machine is not None and getattr(machine, "sleeping", False):
+        if getattr(machine, "sleeping_pose_available", True):
+            lines.append(
+                "  Sleeping pose: the artwork's own sleeping animation"
+            )
+        else:
+            lines.append(
+                "  Sleeping pose: this artwork has no sleeping animation, so "
+                "Peeko shows the tired blink instead (documented fallback — "
+                "the sleep itself, and its effect on his stats, is real)"
+            )
+    return lines
+
+
 def build_status_text(settings, machine=None, manifest=None, emotions=None) -> str:
     """The full Check Status readout, built from live, existing state.
 
@@ -131,6 +187,12 @@ def build_status_text(settings, machine=None, manifest=None, emotions=None) -> s
         "microphone and puts the words in the message box",
         "pet actions (Stage 6): Pet and Play change Peeko's real mood and "
         "needs, and chatting lifts them too",
+        "feeding (Stage 7): Feed offers apple, pizza, cookie, burger or "
+        "milk; each changes hunger, energy and mood for real, and a full or "
+        "sleeping Peeko refuses honestly instead of wasting the food",
+        "sleep (Stage 7): Sleep starts a nap and Wake Up ends it — a napping "
+        "Peeko recovers sleepiness and energy, hunger still falls, and he "
+        "dozes off on his own when he is exhausted (he yawns first)",
     ]
     if getattr(settings, "tts_enabled", False):
         works_today.append(
@@ -164,9 +226,13 @@ def build_status_text(settings, machine=None, manifest=None, emotions=None) -> s
         f"  ({client.configuration_problem() or 'ready to chat'})",
         f"  {client.describe()}",
         "",
-        "EMOTIONS & NEEDS (Stage 6)",
+        "EMOTIONS & NEEDS (Stages 6-7)",
         _RULE,
         *_emotion_lines(emotions),
+        "",
+        "FEEDING & SLEEPING (Stage 7)",
+        _RULE,
+        *_feed_lines(emotions, machine),
         "",
         "WORKS TODAY",
         _RULE,
@@ -327,6 +393,39 @@ def show_settings_dialog(parent, settings) -> SettingsDialog:
     dialog.raise_()
     dialog.activateWindow()
     return dialog
+
+
+# --------------------------------------------------------------------------- #
+# Honest notices (a real action really did nothing)
+# --------------------------------------------------------------------------- #
+def build_notice_text(detail: str, action: str) -> str:
+    """The body of an honest "nothing changed" notice."""
+    return "\n".join([
+        detail,
+        "",
+        f"Nothing was changed by {action}.",
+    ])
+
+
+def build_notice_dialog(parent, title: str, detail: str,
+                        action: str = "this action"):
+    """Build (but do not show) a notice that says plainly nothing happened."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Information)
+    box.setWindowTitle(f"{__app_name__} — {title}")
+    box.setTextFormat(Qt.PlainText)
+    box.setText(detail)
+    box.setInformativeText(build_notice_text(detail, action))
+    box.setStandardButtons(QMessageBox.Ok)
+    return box
+
+
+def show_notice_dialog(parent, title: str, detail: str,
+                       action: str = "this action"):
+    """Show such a notice without blocking the UI thread."""
+    box = build_notice_dialog(parent, title, detail, action)
+    _open_async(box)
+    return box
 
 
 # --------------------------------------------------------------------------- #

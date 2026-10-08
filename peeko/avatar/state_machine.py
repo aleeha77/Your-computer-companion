@@ -117,6 +117,21 @@ LISTENING = "listening"
 #: and it wins over the listening pose when both are active.
 TALKING = "talking"
 
+# -- Stage 7: the sleeping pose --------------------------------------------- #
+#: "I am asleep" (the virtual-pet needs system). Sustained like listening and
+#: talking, and it beats both: while Peeko is really asleep the sleeping pose
+#: is the truthful thing on screen, whatever else is going on. The user still
+#: wins — dragging the robot always works, and the pose comes back when the
+#: drag ends (see :meth:`AvatarStateMachine.drag_started`).
+#:
+#: The placeholder artwork has no ``sleeping`` frames, so this state falls back
+#: to an *existing* animation rather than inventing one: see
+#: :data:`SLEEPING_FALLBACK_ANIMATIONS` and
+#: :attr:`AvatarStateMachine.sleeping_pose_available`. The needs system pauses
+#: and restores the stats either way — the pose is cosmetic, the simulation is
+#: not, and Check Status says which of the two is on screen.
+SLEEPING = "sleeping"
+
 LOOK_DIRECTIONS = (LOOK_LEFT, LOOK_RIGHT, LOOK_UP, LOOK_DOWN)
 
 #: Animation-state names the engine always needs; the manifest (or the
@@ -131,14 +146,28 @@ REQUIRED_STATES = frozenset(
 #: manifest does not provide is simply switched off (it never raises), so
 #: artwork manifests written for Stage 1 keep working unchanged — they just
 #: have fewer reactions.
-REACTION_STATES = (HOVER, DOUBLE_CLICK, CONFUSED)
+#: ``yawn`` joined the reactions in Stage 7: the needs system asks for it when
+#: Peeko gets sleepy. The placeholder artwork has no ``yawn`` frames yet, so it
+#: is switched off here and the *caller* shows the documented tired-blink
+#: fallback instead (see :func:`peeko.avatar.expressions.apply_yawn`) — the
+#: state is ready the moment the owner's artwork provides the animation.
+YAWN = "yawn"
+
+REACTION_STATES = (HOVER, DOUBLE_CLICK, CONFUSED, YAWN)
 
 #: Optional states that are *not* one-shot reactions: they are requested by
 #: another module (:mod:`peeko.avatar.expressions`) and stay in effect until
 #: they are explicitly ended. Like reactions they are switched off when the
 #: artwork does not provide their animation, so an older manifest keeps
 #: working.
-SUSTAINED_STATES = (LISTENING, TALKING)
+SUSTAINED_STATES = (LISTENING, TALKING, SLEEPING)
+
+#: Animations the sleeping state may show, best first. ``sleeping`` is the real
+#: pose (a later artwork drop can add it and it is used automatically); the
+#: remaining entries are *existing* animations used as an honest fallback so a
+#: real sleep still looks like something rather than nothing.
+#: :attr:`AvatarStateMachine.sleeping_pose_available` reports which is in use.
+SLEEPING_FALLBACK_ANIMATIONS: tuple[str, ...] = (SLEEPING, BLINK, IDLE)
 
 #: Every state whose animation is optional (a manifest without it still runs).
 OPTIONAL_STATES = (*REACTION_STATES, *SUSTAINED_STATES)
@@ -159,6 +188,8 @@ DEFAULT_STATE_ANIMATIONS: dict[str, str] = {
     CONFUSED: CONFUSED,
     LISTENING: LISTENING,
     TALKING: TALKING,
+    YAWN: YAWN,
+    SLEEPING: SLEEPING,
 }
 
 # --------------------------------------------------------------------------- #
@@ -223,6 +254,22 @@ class AvatarStateMachine:
             else:
                 state_map.pop(state, None)   # optional state switched off
 
+        # Stage 7: sleeping is optional artwork too, but it must still *work*
+        # without it — a nap that shows nothing at all would be dishonest
+        # about the simulation, which really does pause and restore the stats.
+        # So when the manifest has no ``sleeping`` animation the state falls
+        # back to an existing one (blink, else idle) and the app says so.
+        self._sleeping_pose = optional_map.get(SLEEPING) == SLEEPING
+        if SLEEPING not in optional_map:
+            fallback = next(
+                (name for name in SLEEPING_FALLBACK_ANIMATIONS
+                 if name in available),
+                None,
+            )
+            if fallback is not None:
+                state_map[SLEEPING] = fallback
+                optional_map[SLEEPING] = fallback
+
         self._state_map = state_map
         self._reaction_states = frozenset(
             state for state in optional_map if state in REACTION_STATES
@@ -247,6 +294,7 @@ class AvatarStateMachine:
         self._hovering = False
         self._listening = False
         self._talking = False
+        self._sleeping = False
 
     # ------------------------------------------------------------------ #
     # Introspection
@@ -324,6 +372,31 @@ class AvatarStateMachine:
     def talking(self) -> bool:
         """True between :meth:`start_talking` and :meth:`stop_talking`."""
         return self._talking
+
+    @property
+    def sleeping_available(self) -> bool:
+        """Can this machine show *some* sleeping pose?
+
+        Always true while the artwork has at least one usable animation, which
+        a manifest always has: without a real ``sleeping`` animation the state
+        borrows :data:`BLINK` (or :data:`IDLE`), never an invented frame.
+        """
+        return SLEEPING in self._sustained_states
+
+    @property
+    def sleeping_pose_available(self) -> bool:
+        """Does the artwork have a *real* sleeping animation?
+
+        ``False`` means the sleeping state is showing the documented fallback
+        (see :data:`SLEEPING_FALLBACK_ANIMATIONS`) — the app says so in Check
+        Status instead of pretending the artwork exists.
+        """
+        return bool(self._sleeping_pose)
+
+    @property
+    def sleeping(self) -> bool:
+        """True between :meth:`start_sleeping` and :meth:`stop_sleeping`."""
+        return self._sleeping
 
     @property
     def hovering(self) -> bool:
@@ -500,6 +573,8 @@ class AvatarStateMachine:
         """
         if state not in self._reaction_states:
             return False
+        if self._sleeping:
+            return False
         self._set_state(state, restart=True)
         return True
 
@@ -534,6 +609,10 @@ class AvatarStateMachine:
             return False
         if self._press_active or state == DRAGGING or self._state == DRAGGING:
             return False
+        if self._sleeping:
+            # Asleep: nothing cued from outside disturbs the pose. Only the
+            # needs system (or the user) can end a sleep.
+            return False
         if self._listening or self._talking:
             # While the microphone is open or Peeko is speaking, that activity
             # is the user's own request, so a cue does not interrupt it.
@@ -561,6 +640,11 @@ class AvatarStateMachine:
         if not self.listening_available:
             return False
         if self._press_active or self._state == DRAGGING:
+            return False
+        if self._sleeping:
+            # Peeko is asleep: the sleeping pose stays on screen. The chat
+            # window still shows its own "listening…" indicator, so the capture
+            # is never hidden — the robot just does not pretend to be awake.
             return False
         self._listening = True
         active = self._active_sustained_state()
@@ -595,6 +679,8 @@ class AvatarStateMachine:
             return False
         if self._press_active or self._state == DRAGGING:
             return False
+        if self._sleeping:
+            return False
         self._talking = True
         self._set_state(TALKING, restart=True)
         return True
@@ -613,15 +699,51 @@ class AvatarStateMachine:
     def _active_sustained_state(self) -> str | None:
         """The sustained state that should be playing right now, if any.
 
-        Talking beats listening: while Peeko is speaking aloud the talking
-        animation is the truthful thing to show, and a still-open microphone
-        resumes its own pose the moment the playback ends.
+        Sleeping beats talking, and talking beats listening: a genuinely
+        sleeping robot is the truthful thing to show, and while Peeko is
+        speaking aloud the talking animation beats a still-open microphone
+        (which resumes its own pose the moment the playback ends).
         """
+        if self._sleeping and self.sleeping_available:
+            return SLEEPING
         if self._talking and self.talking_available:
             return TALKING
         if self._listening and self.listening_available:
             return LISTENING
         return None
+
+    # ------------------------------------------------------------------ #
+    # Stage 7: the sleeping pose
+    # ------------------------------------------------------------------ #
+    def start_sleeping(self) -> bool:
+        """Show the sleeping pose because the needs system says Peeko is asleep.
+
+        Sustained exactly like listening/talking — it stays until
+        :meth:`stop_sleeping` — and it outranks every other pose. Declined only
+        while the user is holding or dragging the robot, in which case the
+        needs system is still asleep and the pose appears as soon as the drag
+        ends (the machine remembers it, it is not lost).
+
+        :returns: ``True`` when the sleeping state was recorded.
+        """
+        if not self.sleeping_available:
+            return False
+        if self._press_active or self._state == DRAGGING:
+            return False
+        self._sleeping = True
+        self._set_state(SLEEPING, restart=True)
+        return True
+
+    def stop_sleeping(self) -> bool:
+        """End the sleeping pose (Peeko woke up).
+
+        :returns: ``True`` when the sleeping animation was cut short.
+        """
+        was_sleeping = bool(self._sleeping and self._state == SLEEPING)
+        self._sleeping = False
+        if was_sleeping:
+            self._resume_sustained()
+        return was_sleeping
 
     def _resume_sustained(self) -> None:
         """Return to the active sustained state, or to :data:`IDLE`."""

@@ -92,15 +92,23 @@ from peeko.avatar.expressions import (
     apply_emotion,
     apply_expression,
     apply_listening,
+    apply_sleeping,
     apply_speaking,
+    apply_yawn,
 )
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.renderer import draw_frame
 from peeko.avatar.state_machine import IDLE, AvatarStateMachine
-from peeko.emotions.engine import EmotionEngine
+from peeko.emotions.engine import EmotionEngine, FeedResult, SleepResult
+from peeko.needs.behaviour import EVENT_ATTENTION, EVENT_AUTO_SLEEP
+from peeko.needs.behaviour import EVENT_AUTO_WAKE, EVENT_YAW
 from peeko.ui.chat_window import ChatWindow
 from peeko.ui.context_menu import (
     EMOTION_ACTION_IDS,
+    FEED_ID,
+    NEEDS_ACTION_IDS,
+    SLEEP_ID,
+    WAKE_ID,
     QUIT_ID,
     SETTINGS_ID,
     STATUS_ID,
@@ -110,9 +118,16 @@ from peeko.ui.context_menu import (
 )
 from peeko.ui.dialogs import (
     show_not_implemented_dialog,
+    show_notice_dialog,
     show_settings_dialog,
     show_status_dialog,
 )
+from peeko.ui.context_menu import (
+    NEEDS_BARS_ID,
+    build_needs_bars_action,
+)
+from peeko.ui.food_picker import FoodPickerDialog, show_food_picker
+from peeko.ui.needs_bars import NeedsBarsPanel
 
 LOG = logging.getLogger("peeko.avatar")
 
@@ -149,6 +164,11 @@ class AvatarWindow(QWidget):
     #: Stage 6: emitted after a pet/play interaction was applied by the
     #: emotion engine (carries the interaction id) — handy for logging/tests.
     interactionApplied = Signal(str)
+
+    #: Stage 7: emitted when the needs system did something on its own —
+    #: ``yawn``, ``auto_sleep``, ``auto_wake`` or ``attention`` (the boredom
+    #: nudge). Rate-limited in ``peeko.needs.behaviour``.
+    needsEvent = Signal(str)
 
     def __init__(self, settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -200,7 +220,25 @@ class AvatarWindow(QWidget):
             self._manifest.canvas_width, self._manifest.canvas_height
         )
 
+        # ---- Stage 7: the visible needs bars (attached to the robot) ------ #
+        # ON by default — the owner asked to *see* the stats — and toggled
+        # from the right-click menu's checkable "Show Needs Bars" entry. The
+        # panel is a child *window* of this one, so it always travels with the
+        # robot and is never a separate desktop window of its own.
+        self._needs_bars_visible = bool(
+            getattr(settings, "show_needs_bars", True)
+        )
+        self._needs_panel: NeedsBarsPanel | None = None
+
         self._menu = build_avatar_context_menu(self)
+        self._needs_bars_action = build_needs_bars_action(
+            self._menu, checked=self._needs_bars_visible
+        )
+        # Directly above the separator before Quit: a real toggle rather than
+        # one of the pet actions, so it is not part of MENU_SPEC.
+        self._menu.insertAction(
+            self._menu.actions()[-2], self._needs_bars_action
+        )
         self._menu.triggered.connect(self._on_menu_triggered)
 
         quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
@@ -208,6 +246,7 @@ class AvatarWindow(QWidget):
         self.quitRequested.connect(self._quit)
 
         self._place_on_screen()
+        self._show_needs_bars(self._needs_bars_visible)
 
         # ---- animation loop (QTimer-driven; never blocks) ------------------ #
         self._elapsed = QElapsedTimer()
@@ -373,6 +412,25 @@ class AvatarWindow(QWidget):
             # Stage 6: Pet and Play are real — they change Peeko's mood and
             # needs through the emotion engine.
             self._on_pet_action(action_id)
+        elif action_id == FEED_ID:
+            # Stage 7: Feed offers the real food catalogue.
+            self.show_food_picker()
+        elif action_id == NEEDS_BARS_ID:
+            # Stage 7: the checkable "Show Needs Bars" toggle (default ON).
+            # Qt flips the action's checked state before emitting, so a real
+            # click and a direct call both end up honest: follow Qt when it
+            # disagrees with what is on screen, otherwise flip the bars.
+            checked = getattr(action, "isChecked", None)
+            if callable(checked) and bool(checked()) != self._needs_bars_visible:
+                self.set_needs_bars_visible(bool(checked()))
+            else:
+                self.toggle_needs_bars()
+        elif action_id in NEEDS_ACTION_IDS:
+            # Stage 7: Sleep / Wake Up drive the real sleep state.
+            if action_id == SLEEP_ID:
+                self.sleep()
+            else:
+                self.wake()
         elif entry is not None and not entry.implemented:
             self._on_not_implemented(entry)
         else:  # pragma: no cover - defensive: unknown action id
@@ -456,11 +514,122 @@ class AvatarWindow(QWidget):
         return self._emotions
 
     def _on_emotion_tick(self) -> None:
-        """Advance the mood/needs drift by however long really passed."""
-        hours = self._emotions.tick()
+        """Advance the mood/needs drift by however long really passed.
+
+        Stage 7: the tick also asks the needs system what Peeko did on his own
+        (yawned, fell asleep, woke up, asked for attention) and shows it. The
+        drift is skipped while the user is dragging the robot: they are playing
+        with it, so it is not idling.
+        """
+        idle = not (self._drag_active or self._machine.is_pressed)
+        hours = self._emotions.tick(idle=idle)
         if hours:
             LOG.debug("Emotion drift %.4fh -> %s", hours,
                       self._emotions.describe())
+        self._apply_needs_events()
+        self._refresh_needs_bars()
+
+    # ------------------------------------------------------------------ #
+    # Stage 7: feeding, sleeping and needs-driven behaviour
+    # ------------------------------------------------------------------ #
+    def feed(self, food_id: str) -> FeedResult:
+        """Feed Peeko one food through the emotion engine.
+
+        The food's documented deltas are applied to the live needs and mood,
+        the avatar reacts with an existing animation for the resulting mood,
+        and a refusal (asleep, or already full) is reported as plainly as it is
+        decided — with no food consumed.
+        """
+        self._emotions.tick()
+        result = self._emotions.feed(food_id)
+        if not result.applied:
+            self._interactions.record(
+                f"user offered {result.food.label}: refused ({result.message})"
+            )
+            LOG.info("Feed refused: %s", result.message)
+            self._keep_dialog(
+                show_notice_dialog(
+                    self, f"Feed — {result.food.label}", result.message,
+                    action="the offered food",
+                )
+            )
+            return result
+        self._interactions.record(f"user fed Peeko: {result.message}")
+        apply_emotion(self._machine, self._emotions.mood_signal().emotion)
+        LOG.info("Fed %s -> %s", result.food.label, self._emotions.describe())
+        self.interactionApplied.emit(f"feed_{result.food.id}")
+        self._apply_needs_events()
+        return result
+
+    def show_food_picker(self) -> FoodPickerDialog:
+        """Open the honest Feed picker for the current state."""
+        dialog = show_food_picker(
+            self, self.feed,
+            asleep=self._emotions.is_asleep,
+            full=self._emotions.needs.is_full(),
+        )
+        self._keep_dialog(dialog)
+        return dialog
+
+    def sleep(self) -> SleepResult:
+        """Deliberate nap (the Sleep menu entry)."""
+        result = self._emotions.sleep()
+        self._interactions.record(f"user chose Sleep: {result.message}")
+        if not result.changed:
+            self._keep_dialog(
+                show_notice_dialog(
+                    self, "Sleep", result.message, action="the Sleep request"
+                )
+            )
+            return result
+        apply_sleeping(self._machine, True)
+        LOG.info("Asleep -> %s", self._emotions.describe())
+        self.interactionApplied.emit("sleep")
+        return result
+
+    def wake(self) -> SleepResult:
+        """End the nap (the Wake Up menu entry)."""
+        result = self._emotions.wake()
+        self._interactions.record(f"user chose Wake Up: {result.message}")
+        if not result.changed:
+            self._keep_dialog(
+                show_notice_dialog(
+                    self, "Wake Up", result.message,
+                    action="the Wake Up request",
+                )
+            )
+            return result
+        apply_sleeping(self._machine, False)
+        LOG.info("Awake -> %s", self._emotions.describe())
+        self.interactionApplied.emit("wake")
+        return result
+
+    def _apply_needs_events(self) -> None:
+        """Show whatever the needs system decided on its own (never spams).
+
+        Yawning shows the yawn reaction when the artwork has one and the
+        documented tired blink otherwise; falling asleep and waking up drive
+        the sleeping pose; the boredom nudge plays one gentle existing
+        animation and is recorded in the interaction log. Every limit lives in
+        :mod:`peeko.needs.behaviour`, not here.
+        """
+        for event in self._emotions.take_events():
+            self._interactions.record(event.summary)
+            if event.kind == EVENT_YAW:
+                played = apply_yawn(self._machine)
+                LOG.info("Needs: yawn (avatar state %r)", played)
+            elif event.kind == EVENT_AUTO_SLEEP:
+                apply_sleeping(self._machine, True)
+                LOG.info("Needs: Peeko fell asleep")
+            elif event.kind == EVENT_AUTO_WAKE:
+                apply_sleeping(self._machine, False)
+                LOG.info("Needs: Peeko woke up")
+            elif event.kind == EVENT_ATTENTION:
+                # The closest thing the placeholder artwork has to
+                # "hey, look at me" — an existing animation, never a fake one.
+                apply_expression(self._machine, "talking_curious")
+                LOG.info("Needs: boredom nudge")
+            self.needsEvent.emit(event.kind)
 
     def _on_pet_action(self, action_id: str) -> None:
         """Pet / Play: apply the engine's documented interaction effect.
@@ -539,6 +708,68 @@ class AvatarWindow(QWidget):
         LOG.info("Speech %s -> avatar state %r",
                  "started" if speaking else "finished", played)
         return played
+
+    # ------------------------------------------------------------------ #
+    # Stage 7: the visible needs bars (part of the robot, not a window)
+    # ------------------------------------------------------------------ #
+    def _ensure_needs_panel(self) -> NeedsBarsPanel:
+        """The panel, created on first use (never shown until asked)."""
+        if self._needs_panel is None:
+            self._needs_panel = NeedsBarsPanel(self)
+        return self._needs_panel
+
+    def _show_needs_bars(self, visible: bool) -> None:
+        """Show or hide the bars, keeping the menu toggle in step."""
+        self._needs_bars_visible = bool(visible)
+        panel = self._ensure_needs_panel()
+        if self._needs_bars_visible:
+            panel.follow(self)
+            panel.show()
+        else:
+            panel.hide()
+        action = getattr(self, "_needs_bars_action", None)
+        if action is not None:
+            blocked = action.blockSignals(True)
+            action.setChecked(self._needs_bars_visible)
+            action.blockSignals(blocked)
+
+    def _refresh_needs_bars(self) -> None:
+        """Push the live engine snapshot into the bars (real time, never blocks).
+
+        The snapshot is the same one Check Status and the AI context use, so a
+        bar can never disagree with the simulation the user is watching.
+        """
+        if not self._needs_bars_visible:
+            return
+        panel = self._ensure_needs_panel()
+        panel.update_from_snapshot(self._emotions.snapshot())
+        panel.follow(self)
+        if not panel.isVisible():
+            panel.show()
+
+    @property
+    def needs_bars_visible(self) -> bool:
+        """Are the needs bars currently shown (default: yes)?"""
+        return bool(self._needs_bars_visible)
+
+    @property
+    def needs_panel(self) -> NeedsBarsPanel:
+        """The attached needs-bars panel (created on first use)."""
+        return self._ensure_needs_panel()
+
+    def set_needs_bars_visible(self, visible: bool) -> None:
+        """Show or hide the bars (the "Show Needs Bars" menu toggle)."""
+        LOG.info("Needs bars %s.", "shown" if visible else "hidden")
+        self._show_needs_bars(visible)
+
+    def needs_bars_action(self):
+        """The checkable menu action that shows/hides the bars."""
+        return self._needs_bars_action
+
+    def toggle_needs_bars(self) -> bool:
+        """Flip the bars and return the new visibility."""
+        self.set_needs_bars_visible(not self._needs_bars_visible)
+        return self._needs_bars_visible
 
     def _show_settings(self) -> None:
         """Settings: the (read-only) configuration Peeko is running with."""

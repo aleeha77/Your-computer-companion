@@ -9,9 +9,12 @@ explanation of when they land.
 Stage 3 turns the first of them on: **Talk** now opens the real chat window
 (see :mod:`peeko.ui.chat_window`). Stage 6 turns on **Pet** and **Play**,
 which apply the emotion engine's documented interaction effects — they change
-Peeko's live mood and needs, and they are not decorative buttons. **Check
-Status**, **Settings** and **Quit** work as before, and **Feed**, **Sleep**
-and **Wake Up** stay labelled as Stage 7 work.
+Peeko's live mood and needs, and they are not decorative buttons. Stage 7
+turns on the last three: **Feed** opens the food picker
+(:mod:`peeko.ui.food_picker`), **Sleep** starts a nap and **Wake Up** ends it,
+all through :class:`peeko.emotions.engine.EmotionEngine`. **Check Status**,
+**Settings** and **Quit** work as before, and :func:`future_entries` is now
+empty: every entry in the menu does something real.
 
 Everything is described by :data:`MENU_SPEC` — a single, inspectable data
 structure the Qt builder consumes, so "what the menu shows" can be tested
@@ -24,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu
 
 from peeko import __stage__, __total_stages__, __version__
@@ -43,6 +47,8 @@ QUIT_ID = "quit"
 
 #: Pet actions that are real since Stage 6 (they drive the emotion engine).
 EMOTION_ACTION_IDS: tuple[str, ...] = (PET_ID, PLAY_ID)
+#: The Stage 7 needs actions: Feed (a real food picker), Sleep and Wake Up.
+NEEDS_ACTION_IDS: tuple[str, ...] = (FEED_ID, SLEEP_ID, WAKE_ID)
 
 
 @dataclass(frozen=True)
@@ -96,13 +102,19 @@ class MenuEntry:
 MENU_SPEC: tuple[Optional[MenuEntry], ...] = (
     MenuEntry(TALK_ID, "Talk", None,
               "chat with Peeko in its own window (needs your own AI key)"),
-    MenuEntry(FEED_ID, "Feed", 7, "hunger, from the virtual-pet needs system"),
+    MenuEntry(FEED_ID, "Feed", None,
+              "choosing one of five foods (apple, pizza, cookie, burger, "
+              "milk); each changes hunger, energy and mood for real, and a "
+              "full or sleeping Peeko refuses honestly"),
     MenuEntry(PET_ID, "Pet", None,
               "Peeko's mood lifts and he feels closer to you"),
     MenuEntry(PLAY_ID, "Play", None,
               "fun and excitement — it costs energy and makes him hungry"),
-    MenuEntry(SLEEP_ID, "Sleep", 7, "sleep and energy from the needs system"),
-    MenuEntry(WAKE_ID, "Wake Up", 7, "waking up, from the needs system"),
+    MenuEntry(SLEEP_ID, "Sleep", None,
+              "a nap: sleepiness and energy recover while he sleeps, and "
+              "hunger keeps falling"),
+    MenuEntry(WAKE_ID, "Wake Up", None,
+              "ending the nap, with a small stretch and a happy bump"),
     None,  # separator: pet actions above, the rest of the menu below
     MenuEntry(STATUS_ID, "Check Status…", None,
               "what Peeko is doing right now"),
@@ -175,6 +187,30 @@ def build_avatar_context_menu(parent) -> QMenu:
     return menu
 
 
+#: Stage 7: the checkable "Show Needs Bars" toggle. It is not one of the pet
+#: actions in :data:`MENU_SPEC` — the avatar window inserts it directly (see
+#: :func:`build_needs_bars_action`) — because it does not do anything *to*
+#: Peeko; it only decides whether the little stat panel is on screen.
+NEEDS_BARS_ID = "toggle_needs_bars"
+
+
+def build_needs_bars_action(parent, *, checked: bool = True):
+    """Build the checkable **Show Needs Bars** menu entry (Stage 7).
+
+    :param checked: whether the bars are on screen right now (they default to
+        ON, because the whole point of the panel is that the stats are
+        visible).
+    """
+    action = QAction("Show Needs Bars", parent)
+    action.setCheckable(True)
+    action.setChecked(bool(checked))
+    action.setData(NEEDS_BARS_ID)
+    action.setToolTip(
+        "show or hide the little stat bars that sit beside the robot"
+    )
+    return action
+
+
 def quit_application() -> None:
     """Quit the running QApplication (used by menu actions)."""
     app = QApplication.instance()
@@ -200,6 +236,7 @@ __all__ = [
     "FEED_ID",
     "MENU_ENTRIES",
     "MENU_SPEC",
+    "NEEDS_ACTION_IDS",
     "PET_ID",
     "PLAY_ID",
     "QUIT_ID",

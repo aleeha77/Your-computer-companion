@@ -57,5 +57,5 @@ functionality.
 
 __app_name__ = "Peeko"
 __version__ = "0.1.0"
-__stage__ = 6
+__stage__ = 7
 __total_stages__ = 13

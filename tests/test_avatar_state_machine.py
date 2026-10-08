@@ -20,6 +20,8 @@ import pytest
 from peeko.avatar import state_machine
 from peeko.avatar.manifest import load_manifest
 from peeko.avatar.state_machine import (
+    SLEEPING,
+    YAWN,
     BLINK,
     BLINK_MAX_MS,
     CLICK,
@@ -106,14 +108,27 @@ def test_starts_idle_on_the_first_idle_frame(machine):
 
 
 def test_state_animation_map_falls_back_to_builtin_defaults(machine):
-    """A manifest without ``state_animation_map`` uses the built-in map."""
-    assert machine.state_animation_map == DEFAULT_STATE_ANIMATIONS
+    """A manifest without ``state_animation_map`` uses the built-in map.
+
+    Stage 7 adds two states to that map: the ``sleeping`` pose (which falls
+    back to an existing animation when the artwork has no sleeping frames, see
+    ``SLEEPING_FALLBACK_ANIMATIONS``) and the ``yawn`` reaction, which is
+    switched off for artwork that cannot draw it.
+    """
+    expected = {
+        state: anim for state, anim in DEFAULT_STATE_ANIMATIONS.items()
+        if state != YAWN
+    }
+    expected[SLEEPING] = machine.state_animation_map[SLEEPING]
+    assert machine.state_animation_map == expected
+    assert machine.state_animation_map[SLEEPING] in ("blink", "idle")
+    assert YAWN not in machine.state_animation_map
     # …including both sustained states: the built-in map is the fallback the
     # machine starts from, so a state added to ``SUSTAINED_STATES`` but
     # forgotten in ``DEFAULT_STATE_ANIMATIONS`` fails right here.
     for state in SUSTAINED_STATES:
         assert DEFAULT_STATE_ANIMATIONS[state] == state
-        assert machine.state_animation_map[state] == state
+        assert machine.state_animation_map[state] is not None
 
 
 def test_the_packaged_artwork_covers_every_builtin_state():
@@ -128,7 +143,18 @@ def test_the_packaged_artwork_covers_every_builtin_state():
     machine = AvatarStateMachine(
         load_manifest(packaged), rng=random.Random(7)
     )
-    assert machine.state_animation_map == DEFAULT_STATE_ANIMATIONS
+    expected = {
+        state: anim for state, anim in DEFAULT_STATE_ANIMATIONS.items()
+        if state != YAWN
+    }
+    expected[SLEEPING] = machine.state_animation_map[SLEEPING]
+    assert machine.state_animation_map == expected
+    assert machine.state_animation_map[SLEEPING] in ("blink", "idle")
+    # The placeholder artwork has no sleeping or yawn frames yet, and says so
+    # instead of pretending: sleeping shows an existing animation as its
+    # documented fallback, and apply_yawn blinks instead of yawning.
+    assert machine.sleeping_pose_available is False
+    assert machine.reaction_available(YAWN) is False
     assert machine.talking_available is True
     assert machine.listening_available is True
 
@@ -146,10 +172,12 @@ def test_the_effective_map_is_the_builtin_map_minus_unavailable_states(
     path = _manifest_without(avatar_assets, manifest_data, "talking", "listening")
     machine = AvatarStateMachine(load_manifest(path), rng=random.Random(7))
 
-    assert machine.state_animation_map == {
+    expected = {
         state: anim for state, anim in DEFAULT_STATE_ANIMATIONS.items()
-        if state not in (LISTENING, TALKING)
+        if state not in (LISTENING, TALKING, YAWN)
     }
+    expected[SLEEPING] = machine.state_animation_map[SLEEPING]
+    assert machine.state_animation_map == expected
     # The *builtin* map still carries them — only this artwork does not.
     assert DEFAULT_STATE_ANIMATIONS[LISTENING] == LISTENING
     assert DEFAULT_STATE_ANIMATIONS[TALKING] == TALKING
@@ -411,10 +439,19 @@ def test_ticks_never_block(machine):
 # Stage 2: hover reaction
 # --------------------------------------------------------------------------- #
 def test_stage_two_reactions_are_available_from_the_manifest(machine):
-    assert machine.available_reactions == frozenset(REACTION_STATES)
-    for state in REACTION_STATES:
+    """The three Stage 2 reactions, for artwork that can draw them.
+
+    Stage 7 added ``yawn`` to ``REACTION_STATES``; this test artwork has no
+    yawn frames, so that one reaction is switched off (``apply_yawn`` then
+    blinks — the documented fallback), while the Stage 2 three stay playable.
+    """
+    assert machine.available_reactions == frozenset(
+        ({HOVER, DOUBLE_CLICK, CONFUSED})
+    )
+    for state in (HOVER, DOUBLE_CLICK, CONFUSED):
         assert machine.reaction_available(state)
         assert machine.state_animation_map[state] == state
+    assert machine.reaction_available(YAWN) is False
 
 
 def test_hover_enter_plays_the_hover_reaction(machine):
@@ -827,7 +864,7 @@ def test_listening_is_switched_off_when_the_manifest_lacks_it(
 
 def test_a_sustained_state_is_not_a_reaction(machine):
     """Reactions are one-shot and cued; listening and talking are neither."""
-    assert SUSTAINED_STATES == (LISTENING, TALKING)
+    assert SUSTAINED_STATES == (LISTENING, TALKING, SLEEPING)
     for state in SUSTAINED_STATES:
         assert state not in REACTION_STATES
         assert machine.reaction_available(state) is False

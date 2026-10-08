@@ -258,7 +258,7 @@ def test_pet_and_play_are_real_menu_entries():
 
     for action_id in ("pet", "play"):
         assert find_entry(action_id).implemented
-    assert {entry.id for entry in future_entries()} == {"feed", "sleep", "wake"}
+    assert {entry.id for entry in future_entries()} == set()
 
 
 def test_menu_pet_action_changes_the_live_engine(window):
@@ -308,7 +308,7 @@ def test_status_readout_shows_the_six_live_stats(window):
         window._settings, machine=window._machine,
         manifest=window._manifest, emotions=window.emotions,
     )
-    assert "EMOTIONS & NEEDS (Stage 6)" in text
+    assert "EMOTIONS & NEEDS (Stages 6-7)" in text
     for label in ("Happiness", "Energy", "Hunger", "Boredom", "Sleepiness",
                   "Friendship"):
         assert f"{label}:" in text

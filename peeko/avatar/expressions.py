@@ -48,7 +48,9 @@ from peeko.avatar.state_machine import (
     LOOK_LEFT,
     LOOK_RIGHT,
     LOOK_UP,
+    SLEEPING,
     TALKING,
+    YAWN,
 )
 from peeko.emotions.state import Emotion
 
@@ -238,19 +240,86 @@ def apply_speaking(machine, speaking: bool) -> str | None:
     return machine.state
 
 
+# --------------------------------------------------------------------------- #
+# Stage 7: sleeping and yawning
+# --------------------------------------------------------------------------- #
+#: What Peeko shows while the needs system has him asleep. Optional artwork:
+#: :func:`sleeping_pose_available` says whether the real ``sleeping`` frames are
+#: on screen or the documented fallback, and Check Status reports the same
+#: thing — the simulation is real either way.
+SLEEPING_STATE = SLEEPING
+
+#: The sleepy signal (Stage 7). Played as a one-shot reaction when the artwork
+#: provides ``yawn`` frames; otherwise :func:`apply_yawn` falls back to the
+#: tired blink, which is the same honest approximation Stage 6 uses for the
+#: TIRED mood.
+YAWN_STATE = YAWN
+
+
+def sleeping_available(machine) -> bool:
+    """Can the machine show *some* sleeping pose?"""
+    return bool(machine.sleeping_available)
+
+
+def sleeping_pose_available(machine) -> bool:
+    """Does the artwork have a real ``sleeping`` animation (not the fallback)?"""
+    return bool(machine.sleeping_pose_available)
+
+
+def apply_sleeping(machine, asleep: bool) -> str | None:
+    """Show (or end) the sleeping pose.
+
+    :param machine: the avatar state machine.
+    :param asleep: ``True`` when the needs system put Peeko to sleep, ``False``
+        when he woke up.
+    :returns: the state played, or ``None`` when the machine declined — the
+        user is holding or dragging the robot right now, or there was no pose
+        to end. A declined *start* is not lost: the machine remembers that
+        Peeko is asleep and shows the pose as soon as the drag ends. When a
+        pose *was* ended the state now on screen is returned (idle, or another
+        sustained pose such as talking).
+    """
+    if asleep:
+        return SLEEPING if machine.start_sleeping() else None
+    if not machine.stop_sleeping():
+        return None
+    return machine.state
+
+
+def apply_yawn(machine) -> str | None:
+    """The sleepy signal: a yawn when the artwork has it, else a tired blink.
+
+    :returns: the state played, or ``None`` when the machine declined (asleep,
+    being dragged, or — with the placeholder artwork — a cued animation that
+    could not start).
+    """
+    if not machine.sleeping and machine.reaction_available(YAWN_STATE):
+        if machine.play_reaction(YAWN_STATE):
+            return YAWN_STATE
+    # Honest fallback: no yawn frames in this artwork, so Peeko shows the
+    # tired blink instead of an invented animation.
+    return apply_emotion(machine, Emotion.TIRED)
+
+
 __all__ = [
     "ANIMATION_STATE_MAP",
     "EMOTION_ANIMATION_MAP",
     "FALLBACK_STATE",
     "LISTENING_STATE",
+    "SLEEPING_STATE",
     "TALKING_STATE",
+    "YAWN_STATE",
     "apply_emotion",
     "apply_expression",
-    "emotion_animation",
     "apply_listening",
+    "apply_sleeping",
     "apply_speaking",
+    "apply_yawn",
+    "emotion_animation",
     "expression_state",
     "known_animations",
     "listening_available",
+    "sleeping_available",
+    "sleeping_pose_available",
     "talking_available",
 ]

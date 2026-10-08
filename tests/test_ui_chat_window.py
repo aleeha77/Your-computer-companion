@@ -184,7 +184,7 @@ def test_talk_pet_and_play_are_the_menu_entries_that_graduated():
         assert entry is not None and entry.implemented is True
         assert entry.display_label == entry.label
     still_future = {entry.id for entry in future_entries()}
-    assert still_future == {"feed", "sleep", "wake"}
+    assert still_future == set()
 
 
 def test_reopening_talk_reuses_the_window_and_keeps_the_conversation(

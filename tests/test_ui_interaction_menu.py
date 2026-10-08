@@ -66,16 +66,10 @@ from peeko.ui.dialogs import (
 
 PACKAGED_MANIFEST = DEFAULT_ASSETS_DIR / "manifest.json"
 
-#: The pet actions that are *still* only planned, with the stage that will
-#: implement each. Order matters: it is the documented menu order. Pet and
-#: Play used to be listed here; Stage 6 turned them into real interactions
-#: (they drive the live emotion engine), so only the Stage 7 needs actions
-#: remain.
-EXPECTED_FUTURE_ENTRIES = (
-    ("feed", "Feed", 7),
-    ("sleep", "Sleep", 7),
-    ("wake", "Wake Up", 7),
-)
+#: The pet actions that were *still* only planned. Pet and Play were turned on
+#: in Stage 6, and Stage 7 turned on the last three (Feed / Sleep / Wake Up),
+#: so nothing in the menu is planned any more — the empty tuple is the point.
+EXPECTED_FUTURE_ENTRIES = ()
 
 #: The pet actions that became real in Stage 6, in menu order.
 EXPECTED_EMOTION_ACTIONS = (
@@ -104,13 +98,25 @@ def machine():
 # --------------------------------------------------------------------------- #
 # Menu structure — every entry present, planned ones flagged
 # --------------------------------------------------------------------------- #
-def test_menu_lists_the_remaining_planned_pet_actions_with_their_stage():
+def test_no_menu_entry_is_still_planned_since_stage_7():
+    """Feed, Sleep and Wake Up are real since Stage 7 — nothing is planned.
+
+    They used to be listed here as unimplemented; Stage 7 made them work
+    (the food picker and the real nap state in ``peeko.emotions.engine``), so
+    the honest list of planned entries is now empty and the three entries
+    carry no "not implemented" label.
+    """
     future = future_entries()
     assert [(e.id, e.label, e.stage) for e in future] == list(
         EXPECTED_FUTURE_ENTRIES
     )
-    for entry in future:
-        assert entry.implemented is False
+    assert future == ()
+    for action_id in ("feed", "sleep", "wake"):
+        entry = find_entry(action_id)
+        assert entry is not None
+        assert entry.implemented is True
+        assert entry.stage is None
+        assert "not implemented" not in entry.display_label.lower()
 
 
 def test_pet_and_play_are_real_interaction_entries_since_stage_6():
@@ -135,10 +141,15 @@ def test_menu_planned_entries_are_labelled_as_not_implemented():
 def test_menu_has_the_working_entries_the_owner_asked_for():
     working = {e.id: e for e in entries() if e.implemented}
     # Talk joined the working entries in Stage 3 (it opens the chat window);
-    # Pet and Play joined in Stage 6 (they drive the emotion engine).
+    # Pet and Play in Stage 6 (they drive the emotion engine); and Feed, Sleep
+    # and Wake Up in Stage 7 (the food catalogue and the real nap state).
     assert set(working) == {
-        TALK_ID, PET_ID, PLAY_ID, STATUS_ID, SETTINGS_ID, QUIT_ID,
+        "talk", "feed", "pet", "play", "sleep", "wake",
+        "check_status", "settings", "quit",
     }
+    assert working["feed"].display_label == "Feed"
+    assert working["sleep"].display_label == "Sleep"
+    assert working["wake"].display_label == "Wake Up"
     assert working[TALK_ID].display_label == "Talk"
     assert working[PET_ID].display_label == "Pet"
     assert working[PLAY_ID].display_label == "Play"
@@ -165,7 +176,7 @@ def test_find_entry_resolves_ids_and_rejects_junk():
 
 
 def test_planned_entry_descriptions_name_their_stage():
-    feed = find_entry("feed")
+    feed = MenuEntry("feed", "Feed", 9, "a planned food action")
     assert "not implemented" in feed.description.lower()
     assert f"Stage {feed.stage} of {__total_stages__}" in feed.description
 
@@ -401,7 +412,11 @@ def test_settings_dialog_never_reveals_a_secret(qapp, tmp_path):
 # --------------------------------------------------------------------------- #
 # "Not implemented yet" explanations
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("entry", future_entries(), ids=lambda e: e.id)
+@pytest.mark.parametrize(
+    "entry",
+    [MenuEntry("planned", "Planned feature", 9, "a later stage")],
+    ids=lambda e: e.id,
+)
 def test_not_implemented_text_is_honest_about_every_planned_entry(entry):
     text = build_not_implemented_text(entry)
     assert "not implemented" in text.lower()
@@ -412,7 +427,7 @@ def test_not_implemented_text_is_honest_about_every_planned_entry(entry):
 
 
 def test_not_implemented_dialog_matches_the_entry(qapp):
-    entry = find_entry("feed")
+    entry = MenuEntry("feed", "Feed", 9, "a planned food action")
     box = build_not_implemented_dialog(None, entry)
     try:
         assert box.windowTitle() == "Peeko — Feed"
@@ -424,7 +439,7 @@ def test_not_implemented_dialog_matches_the_entry(qapp):
 
 
 def test_showing_the_not_implemented_dialog_does_not_block(qapp):
-    box = show_not_implemented_dialog(None, find_entry("feed"))
+    box = show_not_implemented_dialog(None, MenuEntry("feed", "Feed", 9, "a planned food action"))
     try:
         assert box.isModal() is False
         assert box.isVisible() is True

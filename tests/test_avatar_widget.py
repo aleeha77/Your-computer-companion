@@ -729,24 +729,23 @@ def test_settings_menu_entry_opens_one_reusable_window(qapp, settings):
         _destroy(window, qapp)
 
 
-def test_a_planned_menu_entry_reacts_and_explains_instead_of_pretending(
-    qapp, settings
-):
+def test_the_needs_bars_toggle_works_from_the_menu(qapp, settings):
+    """Stage 7: the menu's Show Needs Bars entry really shows/hides the bars.
+
+    The bars are ON by default (the owner asked to *see* the stats) and the
+    panel is attached to the robot, so the toggle is the honest way to get rid
+    of it. Nothing is faked: the same call flips what is on screen.
+    """
     window = AvatarWindow(settings)
     try:
-        seen: list[str] = []
-        window.notImplementedRequested.connect(seen.append)
-
-        window._on_menu_triggered(_action_for(window, "feed"))
-        assert window._machine.state == CONFUSED      # "huh?" head-shake
-        assert seen == ["feed"]
-
-        boxes = window.findChildren(QMessageBox)
-        assert len(boxes) == 1
-        text = boxes[0].informativeText()
-        assert "not implemented" in text.lower()
-        assert "Stage 7" in text
-        assert boxes[0].isModal() is False
+        assert window.needs_bars_visible is True
+        window._on_menu_triggered(_action_for(window, "toggle_needs_bars"))
+        assert window.needs_bars_visible is False
+        window._on_menu_triggered(_action_for(window, "toggle_needs_bars"))
+        assert window.needs_bars_visible is True
+        # The panel is part of the robot window, never a separate app window.
+        assert window.needs_panel.parent() is window
+        assert window.needs_bars_action().isChecked() is True
     finally:
         _destroy(window, qapp)
 

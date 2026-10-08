@@ -1,4 +1,4 @@
-"""The emotion engine (Stage 6): Peeko's mood and stats, live over time.
+"""The emotion engine (Stages 6-7): Peeko's mood and needs, live over time.
 
 :mod:`peeko.emotions.state` holds the *data model* (PAD space + named
 emotions); :mod:`peeko.needs.system` holds the *need* model (0..100 values
@@ -6,9 +6,18 @@ that decay over time). This module owns one of each and turns them into the
 thing the rest of the app can actually use:
 
 * **drift** — :meth:`EmotionEngine.tick` advances both models by the real
-  elapsed time, through an *injectable clock* so tests are deterministic;
+  elapsed time, through an *injectable clock* so tests are deterministic, and
+  while Peeko is asleep it *restores* the sleep and energy needs instead of
+  decaying them (:meth:`peeko.needs.system.PetNeeds.tick`);
 * **interactions** — :meth:`EmotionEngine.interact` applies the documented
-  deltas of one user action (talk / pet / play / status);
+  deltas of one user action (talk / pet / play / status / feed / sleep / wake);
+* **feeding and sleeping** — :meth:`EmotionEngine.feed` eats one food from the
+  :data:`peeko.needs.system.FOODS` catalogue (and refuses honestly when Peeko
+  is full or asleep), :meth:`EmotionEngine.sleep` / :meth:`EmotionEngine.wake`
+  start and end a nap, and :meth:`EmotionEngine.take_events` hands out what
+  the needs system decided on its own (yawning, falling asleep, waking up, a
+  boredom nudge) — all of it rate-limited in
+  :mod:`peeko.needs.behaviour`;
 * **a snapshot** — :meth:`EmotionEngine.snapshot` returns the six 0..100
   stats Peeko shows and sends to the AI, on exactly the scales
   :class:`peeko.ai.context.ChatContext` documents.
@@ -33,7 +42,8 @@ escapes this module):
 * interactions move PAD and the needs by the fixed deltas in
   :data:`INTERACTION_EFFECTS`.
 
-Nothing here is persisted yet: the engine is in-memory for one run. Stage 8
+Every needs value is 0..100 and clamped; nothing unclamped escapes. Nothing
+here is persisted yet: the engine is in-memory for one run. Stage 8
 (persistent memory) is what will save and restore it — see the README.
 """
 
@@ -45,7 +55,15 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from peeko.emotions.state import EmotionalState, Emotion
-from peeko.needs.system import Need, PetNeeds
+from peeko.needs.behaviour import NeedsBehaviour, NeedsEvent
+from peeko.needs.system import (
+    FOODS,
+    FULL_HUNGER,
+    Food,
+    Need,
+    PetNeeds,
+    find_food,
+)
 
 LOG = logging.getLogger("peeko.emotions")
 
@@ -121,8 +139,62 @@ INTERACTION_EFFECTS: dict[str, InteractionEffect] = {
     ),
 }
 
+# --------------------------------------------------------------------------- #
+# Stage 7: eating, sleeping and waking
+# --------------------------------------------------------------------------- #
+#: Prefix of the per-food eating interactions (``feed_apple``, ``feed_pizza``,
+#: ...). One :class:`InteractionEffect` is generated per entry of
+#: :data:`peeko.needs.system.FOODS`, straight from the food's documented
+#: deltas, so the README table, the Feed picker and the effects can never
+#: drift apart.
+FEED_INTERACTION_PREFIX = "feed_"
+
+
+def feed_interaction_id(food_id: str) -> str:
+    """The interaction id applied when Peeko eats ``food_id``."""
+    return f"{FEED_INTERACTION_PREFIX}{food_id}"
+
+
+for _food in FOODS.values():
+    INTERACTION_EFFECTS[feed_interaction_id(_food.id)] = InteractionEffect(
+        id=feed_interaction_id(_food.id),
+        summary=f"eating {_food.label.lower()}: {_food.summary}",
+        pleasure=_food.pleasure,
+        arousal=_food.arousal,
+        needs=(
+            (Need.HUNGER, _food.hunger),
+            (Need.ENERGY, _food.energy),
+            (Need.FRIENDSHIP, _food.friendship),
+            (Need.BOREDOM, _food.boredom),
+        ),
+    )
+
+#: Starting a nap and ending one. Sleeping's real work is time-based
+#: (:data:`peeko.needs.system.SLEEP_RECOVERY_PER_HOUR`); these small PAD deltas
+#: are the mood of settling down and of waking up.
+INTERACTION_EFFECTS["sleep"] = InteractionEffect(
+    id="sleep",
+    summary="settling down to sleep: Peeko calms down and relaxes",
+    pleasure=0.02,
+    arousal=-0.10,
+    dominance=-0.05,
+    needs=((Need.ENERGY, 0.0),),
+)
+INTERACTION_EFFECTS["wake"] = InteractionEffect(
+    id="wake",
+    summary="waking up: a small stretch, and Peeko is pleased to see you",
+    pleasure=0.05,
+    arousal=0.05,
+    needs=((Need.FRIENDSHIP, 0.5),),
+)
+
 #: The interactions the UI may ask for (used by tests and the menu wiring).
 INTERACTION_IDS: tuple[str, ...] = tuple(INTERACTION_EFFECTS)
+
+#: The five food-eating interactions, in catalogue order.
+FEED_INTERACTION_IDS: tuple[str, ...] = tuple(
+    feed_interaction_id(food_id) for food_id in FOODS
+)
 
 #: What a *chat turn* counts as (see :meth:`EmotionEngine.interact`).
 CHAT_INTERACTION = "talk"
@@ -150,6 +222,11 @@ class EmotionSnapshot:
     sleepiness: float
     friendship: float
     pad: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    #: Stage 7: is Peeko really asleep right now (needs system, not artwork)?
+    asleep: bool = False
+    #: Why the *mood hint* (:meth:`EmotionEngine.mood_signal`) says what it
+    #: says — ``""`` when the PAD mood is what is showing.
+    mood_reason: str = ""
 
     @property
     def emotion_name(self) -> str:
@@ -180,6 +257,72 @@ class EmotionSnapshot:
 
 
 # --------------------------------------------------------------------------- #
+# Stage 7: needs-driven mood, feeding and sleeping results
+# --------------------------------------------------------------------------- #
+#: When a need is at or below its threshold, that need decides Peeko's
+#: *expression* — tired when sleepy, sad when hungry or bored, tired when
+#: exhausted. The placeholder emotion set has no hungry or bored emotion, so
+#: they borrow ``sad`` exactly like the Stage 6 table borrows ``blink`` for
+#: tired: documented approximation, never an invented animation. The lowest
+#: value wins when several needs are low; ties keep this order.
+NEED_MOOD_HINTS: tuple[tuple[Need, float, Emotion, str], ...] = (
+    (Need.SLEEP, 45.0, Emotion.TIRED, "sleepy"),
+    (Need.HUNGER, 25.0, Emotion.SAD, "hungry"),
+    (Need.BOREDOM, 25.0, Emotion.SAD, "bored"),
+    (Need.ENERGY, 20.0, Emotion.TIRED, "exhausted"),
+)
+
+
+@dataclass(frozen=True)
+class MoodSignal:
+    """Peeko's expression mood: the named emotion plus why it was chosen."""
+
+    emotion: Emotion
+    reason: str
+
+    @property
+    def emotion_name(self) -> str:
+        return str(self.emotion.value)
+
+
+@dataclass(frozen=True)
+class FeedResult:
+    """What happened when the user offered Peeko one food.
+
+    ``applied`` is the honest part: ``False`` means nothing changed and
+    ``message`` says exactly why (Peeko is full, or asleep). No food is ever
+    consumed by a refusal.
+    """
+
+    food: Food
+    applied: bool
+    message: str
+
+
+@dataclass(frozen=True)
+class SleepResult:
+    """What happened when somebody asked Peeko to sleep (or to wake up)."""
+
+    asleep: bool
+    changed: bool
+    message: str
+
+
+@dataclass(frozen=True)
+class NeedsReport:
+    """The feeding/sleeping facts Check Status reports (all real)."""
+
+    asleep: bool
+    last_meal: str | None
+    last_meal_ago_hours: float | None
+    sleeps: int
+    auto_sleeps: int
+    auto_wakes: int
+    yawns: int
+    attention_nudges: int
+
+
+# --------------------------------------------------------------------------- #
 # The engine
 # --------------------------------------------------------------------------- #
 class EmotionEngine:
@@ -205,11 +348,25 @@ class EmotionEngine:
         self._last_tick: float = float(clock())
         #: Total simulated hours this engine has advanced (diagnostics/tests).
         self.hours_elapsed: float = 0.0
+        #: Stage 7: yawning / auto-sleep / boredom-nudge rules and limits.
+        self.behaviour: NeedsBehaviour = NeedsBehaviour()
+        #: Events the needs system raised but the UI has not read yet.
+        self._events: list[NeedsEvent] = []
+        #: The last thing Peeko ate (``None`` = nothing yet this run).
+        self.last_meal: str | None = None
+        #: Simulated hour at which :attr:`last_meal` was eaten.
+        self.last_meal_hour: float | None = None
 
     # ------------------------------------------------------------------ #
     # Time
     # ------------------------------------------------------------------ #
-    def tick(self, now: float | None = None, *, hours: float | None = None) -> float:
+    def tick(
+        self,
+        now: float | None = None,
+        *,
+        hours: float | None = None,
+        idle: bool = True,
+    ) -> float:
         """Advance the drift to ``now`` (or by ``hours``) and return the hours.
 
         Two ways to drive the same drift, so the app and the tests can each do
@@ -230,6 +387,7 @@ class EmotionEngine:
             return 0.0
         self._drift(hours)
         self.hours_elapsed += hours
+        self._collect_events(idle=idle)
         return hours
 
     def _hours_since(self, now: float | None) -> float:
@@ -240,8 +398,14 @@ class EmotionEngine:
         return hours
 
     def _drift(self, hours: float) -> None:
-        """Decay the needs and pull the PAD axes toward neutral."""
-        self.needs.tick(hours)
+        """Drift the needs and pull the PAD axes toward neutral.
+
+        While Peeko is asleep the ``sleep`` and ``energy`` needs *recover*
+        instead of decaying (a nap has to be worth taking, and it is the only
+        way the sleep need comes back); the PAD axes still fall toward neutral,
+        which is what "calm, undisturbed sleep" looks like on this model.
+        """
+        self.needs.tick(hours, sleeping=self.behaviour.asleep)
         # PAD decays toward (0, 0, 0) — neutral — without overshooting it.
         self.state.pleasure = _toward_zero(
             self.state.pleasure, PLEASURE_DECAY_PER_HOUR * hours
@@ -298,6 +462,159 @@ class EmotionEngine:
         return self.interact(CHAT_INTERACTION, **kwargs)
 
     # ------------------------------------------------------------------ #
+    # Stage 7: feeding
+    # ------------------------------------------------------------------ #
+    @property
+    def is_asleep(self) -> bool:
+        """Is Peeko really asleep (needs system), regardless of artwork?"""
+        return bool(self.behaviour.asleep)
+
+    def feed(self, food_id: str) -> FeedResult:
+        """Feed Peeko one food from the catalogue.
+
+        The deltas are the food's documented ones, applied through
+        :meth:`interact` so the mood and every need move exactly as the README
+        table says. Two honest refusals, both leaving the food untouched:
+
+        * Peeko is **asleep** — wake him up first;
+        * Peeko is **full** (hunger at/above
+          :data:`peeko.needs.system.FULL_HUNGER`) — he would not eat it.
+
+        :raises KeyError: for a food id that is not on the menu (a programming
+            error, like an unknown interaction).
+        """
+        food = find_food(food_id)
+        if food is None:
+            raise KeyError(
+                f"unknown food {food_id!r}; known: {', '.join(FOODS)}"
+            )
+        if self.behaviour.asleep:
+            return FeedResult(
+                food, False,
+                f"Peeko is asleep, so he did not eat the {food.label.lower()}. "
+                "Wake him up (Wake Up) first — nothing was wasted.",
+            )
+        if self.needs.is_full():
+            return FeedResult(
+                food, False,
+                f"Peeko is full (hunger "
+                f"{self.needs.get(Need.HUNGER):.0f}/100) and refused the "
+                f"{food.label.lower()}. Nothing was wasted — offer it again "
+                "once he is hungry.",
+            )
+        effect = self.interact(feed_interaction_id(food.id))
+        self.last_meal = food.label
+        self.last_meal_hour = self.hours_elapsed
+        LOG.info("Fed %s: %s", food.label, effect.summary)
+        return FeedResult(
+            food, True,
+            f"{food.label} eaten — {food.summary}. Peeko now: {self.describe()}",
+        )
+
+    # ------------------------------------------------------------------ #
+    # Stage 7: sleeping and waking
+    # ------------------------------------------------------------------ #
+    def sleep(self) -> SleepResult:
+        """Start a nap deliberately (the Sleep menu entry).
+
+        While asleep the needs drift inverts (see :meth:`_drift`) and the
+        avatar shows the sleeping pose; :meth:`wake` (or an automatic wake-up
+        once he is rested) ends it. Asking again while already asleep changes
+        nothing and says so.
+        """
+        if self.behaviour.asleep:
+            return SleepResult(
+                True, False,
+                "Peeko is already asleep — nothing changed.",
+            )
+        self.tick()
+        self.behaviour.begin_sleep(self.hours_elapsed)
+        effect = self.interact("sleep")
+        LOG.info("Sleep started: %s", effect.summary)
+        return SleepResult(
+            True, True,
+            "Peeko curled up and went to sleep. While he sleeps his sleepiness "
+            "and energy recover; hunger does not. Use Wake Up to end the nap.",
+        )
+
+    def wake(self) -> SleepResult:
+        """Wake Peeko up (the Wake Up menu entry, or an automatic wake-up)."""
+        if not self.behaviour.asleep:
+            return SleepResult(
+                False, False,
+                "Peeko is already awake — nothing changed.",
+            )
+        self.tick()
+        self.behaviour.end_sleep(self.hours_elapsed)
+        self.interact("wake")
+        LOG.info("Woke up: sleepiness %.0f/100", self.sleepiness())
+        return SleepResult(
+            False, True,
+            f"Peeko woke up. Sleepiness is now {self.sleepiness():.0f}/100 "
+            "and energy "
+            f"{self.needs.get(Need.ENERGY):.0f}/100.",
+        )
+
+    # ------------------------------------------------------------------ #
+    # Stage 7: what the needs decided on their own
+    # ------------------------------------------------------------------ #
+    def _collect_events(self, *, idle: bool = True) -> tuple[NeedsEvent, ...]:
+        """Ask the behaviour rules what the needs justify and queue it."""
+        events = self.behaviour.events(
+            self.needs, self.hours_elapsed, idle=idle
+        )
+        for event in events:
+            LOG.info("Needs event %s: %s", event.kind, event.summary)
+        self._events.extend(events)
+        return tuple(events)
+
+    def take_events(self) -> tuple[NeedsEvent, ...]:
+        """Every event raised since the last call, in order (then cleared).
+
+        The UI consumes these to react truthfully: a yawn, falling asleep,
+        waking up, or one gentle boredom nudge.
+        """
+        events = tuple(self._events)
+        self._events = []
+        return events
+
+    def needs_status(self) -> NeedsReport:
+        """The feeding/sleeping facts the status readout shows (all real)."""
+        ago = (
+            None if self.last_meal_hour is None
+            else round(self.hours_elapsed - self.last_meal_hour, 2)
+        )
+        return NeedsReport(
+            asleep=self.is_asleep,
+            last_meal=self.last_meal,
+            last_meal_ago_hours=ago,
+            sleeps=self.behaviour.sleeps,
+            auto_sleeps=self.behaviour.auto_sleeps,
+            auto_wakes=self.behaviour.auto_wakes,
+            yawns=self.behaviour.yawns.total,
+            attention_nudges=self.behaviour.nudges.total,
+        )
+
+    def mood_signal(self) -> MoodSignal:
+        """The expression mood: a low need outranks the PAD mood.
+
+        :data:`NEED_MOOD_HINTS` decides (deepest need first); with every need
+        comfortable this is simply the PAD-dominant emotion, reason ``""``.
+        Sleeping always wins: a sleeping robot looks sleepy.
+        """
+        if self.is_asleep:
+            return MoodSignal(Emotion.TIRED, "asleep")
+        candidates = [
+            (self.needs.get(need), need, emotion, reason)
+            for need, threshold, emotion, reason in NEED_MOOD_HINTS
+            if self.needs.get(need) <= threshold
+        ]
+        if candidates:
+            _, _, emotion, reason = min(candidates, key=lambda c: c[0])
+            return MoodSignal(emotion, reason)
+        return MoodSignal(self.dominant_emotion(), "")
+
+    # ------------------------------------------------------------------ #
     # Read-out
     # ------------------------------------------------------------------ #
     def happiness(self) -> float:
@@ -323,6 +640,8 @@ class EmotionEngine:
             sleepiness=self.sleepiness(),
             friendship=self.needs.get(Need.FRIENDSHIP),
             pad=self.state.tuple(),
+            asleep=self.is_asleep,
+            mood_reason=self.mood_signal().reason,
         )
 
     def describe(self) -> str:
@@ -349,8 +668,18 @@ __all__ = [
     "DOMINANCE_DECAY_PER_HOUR",
     "EmotionEngine",
     "EmotionSnapshot",
+    "FEED_INTERACTION_IDS",
+    "FEED_INTERACTION_PREFIX",
+    "FeedResult",
+    "FULL_HUNGER",
     "INTERACTION_EFFECTS",
     "INTERACTION_IDS",
     "InteractionEffect",
+    "MoodSignal",
+    "NEED_MOOD_HINTS",
+    "NeedsEvent",
+    "NeedsReport",
     "PLEASURE_DECAY_PER_HOUR",
+    "SleepResult",
+    "feed_interaction_id",
 ]
